@@ -8,6 +8,11 @@ name: Build plugin
 on:
   push:
     branches: [main]
+    # Undertow Rack (console/) has its own workflow, console.yml
+    paths-ignore:
+      - "console/**"
+      - ".github/workflows/console.yml"
+      - "install-rack-mac.sh"
   workflow_dispatch:
 
 jobs:

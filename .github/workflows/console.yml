@@ -1,0 +1,81 @@
+# Builds Undertow Rack (the console/ app) on every push that touches it, then publishes it
+# as the "rack-latest" release so it always lives at a fixed link:
+#   https://github.com/<you>/<repo>/releases/download/rack-latest/UndertowRack-macOS.zip
+# On a Mac, install-rack-mac.sh downloads and installs that in one step.
+# Each build is also kept as its own "rack-build-N" release.
+# The Undertow plug-in's own workflow (build.yml) ignores console/, and this one ignores everything else.
+name: Build Undertow Rack
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "console/**"
+      - ".github/workflows/console.yml"
+      - "install-rack-mac.sh"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S console -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          set -o pipefail
+          if ! cmake --build build --config Release --parallel 4 2>&1 | tee build.log; then
+            # Surface compiler errors as annotations (readable without logging in)
+            grep -E "error:|fatal error|Undefined symbols|ld: " build.log | sort -u | head -40 \
+              | sed -E 's/%/%25/g; s/^/::error::/'
+            exit 1
+          fi
+
+      - name: Package
+        run: |
+          mkdir out stage
+          cp -R "build/UndertowRack_artefacts/Release/Undertow Rack.app" stage/
+          # Ad-hoc sign so Apple Silicon will run it
+          codesign --force --deep --sign - "stage/Undertow Rack.app"
+          ditto -c -k --sequesterRsrc --keepParent "stage/Undertow Rack.app" out/UndertowRack-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UndertowRack-macOS
+          path: out
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: UndertowRack-macOS
+          path: dist
+
+      - name: Publish as the "rack-latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          gh release delete rack-latest --repo "$REPO" --yes --cleanup-tag || true
+          gh release create rack-latest dist/UndertowRack-macOS.zip \
+            --repo "$REPO" --target "$GITHUB_SHA" --latest=false \
+            --title "Undertow Rack - latest build" \
+            --notes "Built automatically from ${GITHUB_SHA::7}. On a Mac, install with install-rack-mac.sh (see console/README.md)."
+
+      - name: Also keep this build as its own numbered release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "rack-build-${{ github.run_number }}" dist/UndertowRack-macOS.zip \
+            --repo "$REPO" --target "$GITHUB_SHA" --latest=false \
+            --title "Undertow Rack build ${{ github.run_number }} (${GITHUB_SHA::7})" \
+            --notes "Archived Undertow Rack build from commit ${GITHUB_SHA::7}."
