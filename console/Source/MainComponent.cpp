@@ -1,4 +1,5 @@
 #include "MainComponent.h"
+#include "PluginScanner.h"
 
 namespace
 {
@@ -64,6 +65,7 @@ MainComponent::MainComponent (juce::PropertiesFile& s) : settings (s)
     if (auto xml = settings.getXmlValue ("knownPlugins"))
         rack.knownPlugins.recreateFromXml (*xml);
     rack.knownPlugins.addChangeListener (this);
+    rack.knownPlugins.setCustomScanner (std::make_unique<scanner::OutOfProcessScanner>());
 
     rack.onSlotAboutToChange = [this] (int slot) { closeEditor (slot); };
     rack.onSlotChanged = [this] (int slot) { refreshSlot (slot); markDirty(); };

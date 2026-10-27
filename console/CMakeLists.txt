@@ -47,6 +47,7 @@ juce_add_gui_app(UndertowRack
 target_sources(UndertowRack PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
+    Source/PluginScanner.cpp
     Source/Rack.cpp)
 
 if(APPLE)

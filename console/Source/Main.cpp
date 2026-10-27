@@ -1,15 +1,30 @@
 #include <JuceHeader.h>
 #include "MainComponent.h"
+#include "PluginScanner.h"
 
 class UndertowRackApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return ProjectInfo::projectName; }
     const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
-    bool moreThanOneInstanceAllowed() override { return false; }
+    // true so the hidden scan worker (a second copy of this app) can start.
+    // Opening the app again from Finder still just brings the open one forward.
+    bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise (const juce::String&) override
+    void initialise (const juce::String& commandLine) override
     {
+        // Launched as the plug-in scan worker? Then no window, no Dock icon.
+        auto worker = std::make_unique<scanner::Worker>();
+        if (worker->initialiseFromCommandLine (commandLine, scanner::workerProcessUID))
+        {
+           #if JUCE_MAC
+            juce::Process::setDockIconVisible (false);
+           #endif
+            scanWorker = std::move (worker);
+            return;
+        }
+        worker.reset();
+
         // ~/Library/Application Support/Undertow Rack/Undertow Rack.settings
         juce::PropertiesFile::Options options;
         options.applicationName = "Undertow Rack";
@@ -25,6 +40,7 @@ public:
     {
         mainWindow.reset(); // stops processing, saves settings
         settings.reset();
+        scanWorker.reset();
     }
 
     void systemRequestedQuit() override { quit(); }
@@ -56,6 +72,7 @@ private:
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainWindow)
     };
 
+    std::unique_ptr<scanner::Worker> scanWorker;
     std::unique_ptr<juce::PropertiesFile> settings;
     std::unique_ptr<MainWindow> mainWindow;
 };
