@@ -6,7 +6,7 @@ namespace ParamIDs
 {
     inline const juce::String tightPunch { "tightPunch" };
     inline const juce::String trim[3]  { "trimLow",  "trimMid",  "trimHigh" };
-    inline const juce::String level[3] { "levelLow", "levelMid", "levelHigh" };
+    inline const juce::String level[3] { "bandLow", "bandMid", "bandHigh" };   // 0..1, shown as %
     inline const juce::String solo[3]  { "soloLow",  "soloMid",  "soloHigh" };
     inline const juce::String subMaster { "subMaster" };
     inline const juce::String gainIn { "gainIn" };

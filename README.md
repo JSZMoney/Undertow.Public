@@ -29,7 +29,7 @@ Works in **Adobe Audition** and **Ableton Live**.
 | Control | What it does |
 |---|---|
 | **Subharmonics** | Master level of all generated subs. |
-| **Band knobs** (24–36, 36–56, 56–80 Hz) | Level of the sub landing in each range. Meter under each shows its output. |
+| **Band knobs** (24–36, 36–56, 56–80 Hz) | Level of the sub landing in each range, 0–100% (0% = off, 50% = default, 100% = +12 dB). Meter under each shows its output. |
 | **Trim** (small knob) | 0 to +18 dB boost into that band's input region. Use on quiet sources so the tracker locks on. |
 | **Solo** | Audition only that band's sub: the original is muted and Mix is ignored while any Solo is on. Solo all three to hear just the subs. |
 | **LED** next to each range | Lights when there's material in that range to fold down. Boost bands whose LED is lit. |

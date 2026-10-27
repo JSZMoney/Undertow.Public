@@ -7,6 +7,13 @@ static juce::String dbText (float v, int) { return v <= undertow::kMinDb ? juce:
 static juce::String hzText (float v, int) { return v >= 1000.0f ? juce::String (v / 1000.0f, 2) + " kHz" : juce::String (juce::roundToInt (v)) + " Hz"; }
 static juce::String pctText (float v, int) { return juce::String (juce::roundToInt (v * 100.0f)) + " %"; }
 
+// Band level dial (0..1) to dB: gain = 4 * x^2, so 50% = 0 dB and 100% = +12 dB.
+static float bandPercentToDb (float x)
+{
+    const float g = 4.0f * x * x;
+    return g <= 0.001f ? undertow::kMinDb : 20.0f * std::log10 (g);
+}
+
 UndertowProcessor::UndertowProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
@@ -35,7 +42,10 @@ APVTS::ParameterLayout UndertowProcessor::createLayout()
     for (int b = 0; b < 3; ++b)
     {
         layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::trim[b], v }, String (names[b]) + " Trim", dbRange (0.0f, 18.0f), 0.0f, dbAttr));
-        layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::level[b], v }, String (names[b]) + " Sub", dbRange (undertow::kMinDb, 12.0f), 0.0f, dbAttr));
+        // Shown as a percentage like the original. Audio taper: 0% = off, 25% ≈ -12 dB,
+        // 50% = 0 dB (default), 100% = +12 dB.
+        layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::level[b], v }, String (names[b]) + " Sub",
+                                                           NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f, pctAttr));
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::solo[b], v }, String (names[b]) + " Solo", false));
     }
 
@@ -79,7 +89,7 @@ undertow::Params UndertowProcessor::readParams() const
     for (int b = 0; b < 3; ++b)
     {
         p.trimDb[b] = f (ParamIDs::trim[b]);
-        p.levelDb[b] = f (ParamIDs::level[b]);
+        p.levelDb[b] = bandPercentToDb (f (ParamIDs::level[b]));
         p.solo[b] = f (ParamIDs::solo[b]) > 0.5f;
     }
     p.subMasterDb = f (ParamIDs::subMaster);
