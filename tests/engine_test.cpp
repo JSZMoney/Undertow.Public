@@ -95,8 +95,10 @@ int main()
             }
         };
         const size_t st = (size_t) sr / 2;
-        auto maxDiff = [&] (const std::vector<float>& a, const std::vector<float>& b)
-        { double d = 0; for (size_t i = st; i < a.size(); ++i) d = std::max (d, (double) std::abs (a[i] - b[i])); return d; };
+        // Output is delayed by the limiter's look-ahead (reported to the host as latency).
+        const size_t lat = (size_t) [&] { SubEngine e; e.prepare (sr); return e.latencySamples(); }();
+        auto maxDiff = [&] (const std::vector<float>& out, const std::vector<float>& in)
+        { double d = 0; for (size_t i = st; i < out.size(); ++i) d = std::max (d, (double) std::abs (out[i] - in[i - lat])); return d; };
 
         std::vector<float> L0, R0, L, R; make (L0, R0);
 
@@ -114,7 +116,20 @@ int main()
 
         Params mono = neutral; mono.width = 0.0f;
         L = L0; R = R0; run (mono, L, R);
-        check (maxDiff (L, R) < 1e-4, "Stereo Width 0% gives mono");
+        { double d = 0; for (size_t i = st; i < L.size(); ++i) d = std::max (d, (double) std::abs (L[i] - R[i]));
+          check (d < 1e-4, "Stereo Width 0% gives mono"); }
+
+        // Limiter: everything cranked on a loud signal never goes over the -0.3 dBFS ceiling
+        {
+            std::vector<float> LL ((size_t) N), RR;
+            for (int i = 0; i < N; ++i) LL[(size_t) i] = (float) (0.9 * std::sin (2 * kPi * 60.0 * i / sr) + 0.5 * std::sin (2 * kPi * 3000.0 * i / sr));
+            RR = LL;
+            Params hot; hot.subMasterDb = 12; hot.levelDb = { 12, 12, 12 }; hot.outputDb = 6;
+            run (hot, LL, RR);
+            float pk = 0; for (auto v : LL) pk = std::max (pk, std::abs (v));
+            char msg[96]; std::snprintf (msg, sizeof msg, "limiter holds the ceiling (peak %.2f dBFS)", 20 * std::log10 (pk));
+            check (pk <= 0.9661f, msg);
+        }
 
         Params mm = neutral; mm.monoMakerHz = 200.0f;
         L = L0; R = R0; run (mm, L, R);

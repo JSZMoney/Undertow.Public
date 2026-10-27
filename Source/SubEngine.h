@@ -113,13 +113,10 @@ struct Smoothed
 //==============================================================================
 struct BandDef { double lo, hi; };
 
-// Input regions (what the detector listens to, each with its own Trim) and the
-// output bands their subs land in, dbx 120-style:
-//   Low : notes 48–72 Hz  → sub 24–36 Hz
-//   Mid : notes 72–112 Hz → sub 36–56 Hz
-//   High: notes 112–160 Hz→ sub 56–80 Hz   (bx_subsynth's extra band)
+// Input regions and the output bands their subs land in. These follow the dbx 120XP
+// (notes 48–72 Hz → sub 24–36 Hz, notes 72–112 Hz → sub 36–56 Hz) plus bx_subsynth's
+// extra upper band (notes 112–160 Hz → sub 56–80 Hz).
 constexpr std::array<BandDef, 3> kBands { { { 48.0, 72.0 }, { 72.0, 112.0 }, { 112.0, 160.0 } } };
-constexpr double kXoverLow = 36.0, kXoverHigh = 56.0;
 
 // Linkwitz-Riley 4th-order low/high-pass (two cascaded Butterworth 2nd-order sections)
 struct LR4
@@ -131,175 +128,234 @@ struct LR4
     inline double process (double x) { return b.process (a.process (x)); }
 };
 
-// One subharmonic generator (one per channel, or one for the mid signal).
-//
-// 1. The three input regions are band-passed, trimmed and summed.
-// 2. A single detector follows the FUNDAMENTAL of that signal: zero crossings are
-//    taken from a low-pass-tilted copy so harmonics can't cause extra triggers, with
-//    hysteresis and a minimum-period lockout against noise.
-// 3. A phase-locked sine oscillator is steered so that each half-cycle lasts exactly one
-//    input cycle: a clean, continuous sine at half the fundamental, even when the pitch drifts.
-//    (A sine at f0/2 can never cancel the original note or its harmonics.)
-// 4. Its loudness follows the input's envelope; a gate silences it below -74 dBFS.
-// 5. Low-passed, then split by Linkwitz-Riley crossovers into the 3 output bands
-//    (which sum back flat when all band levels are equal).
-struct SubGenerator
+// One band's octave divider. Like the dbx, each band listens only to its own slice of the
+// spectrum and makes its own sub, so every band is a steady layer you can solo, and a loud
+// vocal in one region can't drive or swell the sub of another.
+//  - Pitch: zero crossings of the band signal, with hysteresis. Crossings closer together than
+//    the band's highest note mean the sound is above the band, so the voice goes quiet rather
+//    than locking onto every other cycle.
+//  - Sound: a phase-locked sine steered so each of its half-cycles lasts exactly one input
+//    cycle: a clean, continuous sine at exactly half the note's frequency.
+//  - Level: follows that band's own envelope.
+struct Voice
 {
-    LR4 inHp48, inLp220, rLowLp, rRestHp, rMidLp, rHighHp, apInLp, apInHp;   // input-region crossovers
-    LR4 deepHp, deepLp;   // 25–48 Hz: lets the tracker hear notes below the lowest band
-    Biquad tilt;
-    Biquad post[3];
-    Biquad postHp;
-    LR4 xLowLp, xLowHp, xHighLp, xHighHp, apLp, apHp;
+    Biquad post[2], rumble;
+    LR4 detHp, detLp;   // extra-steep edges for pitch detection only (not in the sound path)
+    double detEnv = 0;
+    double env = 0, prev = 0, phase = 0, inc = 0, period = 400.0, pol = 1.0;
+    double ampSmooth = 0, gate = 0, harm = 1.0, pitchGain = 1.0;
+    double corr = 0, pow = 0;   // running correlation with the voice below (for polarity alignment)
+    bool armed = false, locked = false, polFlipPending = false;
+    int since = 0, sinceCross = 0, minP = 1, maxP = 1, flipHold = 0, lastSince = 0, sinceGood = 1 << 30, holdGood = 7200;
 
-    double env = 0, envAtk = 0, envRel = 0;
-    double ampEnv = 0, gate = 0, gateAtk = 0, gateRel = 0;
-    double prevTilt = 0.0, phase = 0.0, inc = 0.0;
-    double jumpCand = 0.0;
-    double period = 400.0, ampSmooth = 0.0, ampCoef = 0.0, pitchGain = 0.0, srate = 48000.0;
-    bool armed = false, tooHigh = false;
-    int sinceCross = 0;
-    int sinceFlip = 0, minPeriod = 0, maxPeriod = 0;
-
-    static constexpr double kMakeup = 2.0;   // brings the sub up to roughly the level of the note it comes from
-
-    void prepare (double sr)
+    void prepare (double sr, const BandDef& b, bool withPost)
     {
-        inHp48.setHighpass (sr, kBands[0].lo);  inLp220.setLowpass (sr, kBands[2].hi);
-        rLowLp.setLowpass (sr, kBands[0].hi);   rRestHp.setHighpass (sr, kBands[0].hi);
-        rMidLp.setLowpass (sr, kBands[1].hi);   rHighHp.setHighpass (sr, kBands[1].hi);
-        apInLp.setLowpass (sr, kBands[1].hi);   apInHp.setHighpass (sr, kBands[1].hi);
-        deepHp.setHighpass (sr, 25.0);         deepLp.setLowpass (sr, kBands[0].lo);
-        tilt.setLowpass (sr, 70.0, 0.6);
-        for (int i = 0; i < 3; ++i) post[i].setLowpass (sr, 95.0, kBw6[i]);
-        postHp.setHighpass (sr, 18.0, 0.70710678);
-        xLowLp.setLowpass (sr, kXoverLow);   xLowHp.setHighpass (sr, kXoverLow);
-        xHighLp.setLowpass (sr, kXoverHigh); xHighHp.setHighpass (sr, kXoverHigh);
-        apLp.setLowpass (sr, kXoverHigh);    apHp.setHighpass (sr, kXoverHigh);
-
-        envAtk  = 1.0 - std::exp (-1.0 / (sr * 0.002));
-        envRel  = 1.0 - std::exp (-1.0 / (sr * 0.050));
-        gateAtk = 1.0 - std::exp (-1.0 / (sr * 0.004));
-        gateRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
-        minPeriod = (int) (sr / 240.0);
-        maxPeriod = (int) (sr / 22.0);
-        minPeriod = (int) (sr / 175.0);
-        srate = sr;
-        ampCoef = 1.0 - std::exp (-1.0 / (sr * 0.006));   // smooth the loudness so it can't add grit
+        minP = std::max (1, (int) (sr / (b.hi * 1.05)));
+        maxP = std::max (minP + 1, (int) (sr / (b.lo * 0.8)));
+        if (withPost)
+            for (int i = 0; i < 2; ++i) post[i].setLowpass (sr, b.hi * 0.5 * 1.5, kBw4[i]);
+        rumble.setHighpass (sr, 18.0, 0.70710678);
+        holdGood = (int) (sr * 0.150);
+        detHp.setHighpass (sr, b.lo);
+        detLp.setLowpass (sr, b.hi);
+        harmAtk = 1.0 - std::exp (-1.0 / (sr * 0.060));
+        harmRel = 1.0 - std::exp (-1.0 / (sr * 0.400));
         reset();
     }
 
     void reset()
     {
-        for (auto* l : { &inHp48, &inLp220, &rLowLp, &rRestHp, &rMidLp, &rHighHp, &apInLp, &apInHp, &deepHp, &deepLp }) l->reset();
-        tilt.reset(); for (auto& f : post) f.reset(); postHp.reset();
-        for (auto* l : { &xLowLp, &xLowHp, &xHighLp, &xHighHp, &apLp, &apHp }) l->reset();
-        env = ampEnv = gate = prevTilt = ampSmooth = pitchGain = jumpCand = 0.0;
-        armed = tooHigh = false; sinceFlip = sinceCross = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
-        phase = 0.0; inc = kPi / period;
+        for (auto& f : post) f.reset();
+        rumble.reset();
+        detHp.reset(); detLp.reset();
+        detEnv = 0;
+        env = prev = phase = ampSmooth = gate = corr = pow = 0.0;
+        harm = pitchGain = 1.0; pol = 1.0;
+        armed = locked = polFlipPending = false;
+        since = sinceCross = flipHold = lastSince = 0; sinceGood = 1 << 30; period = 0.5 * (minP + maxP); inc = kPi / period;
     }
 
-    // Returns the three output-band subs; regionLevel receives each trimmed input region (for the LEDs).
-    inline std::array<double, 3> process (double x, const std::array<double, 3>& trim, std::array<double, 3>& regionLevel)
+    // Pitch detection on the band signal. Called every sample.
+    inline void detect (double regionSignal, double envAtk, double envRel)
     {
-        // Split 48–220 Hz into the three regions with Linkwitz-Riley crossovers, so that with
-        // equal trims they sum back to a flat band (no cancellation where regions meet).
-        const double bandIn = inLp220.process (inHp48.process (x));
-        double lowR = rLowLp.process (bandIn);
-        const double restR = rRestHp.process (bandIn);
-        lowR = apInLp.process (lowR) + apInHp.process (lowR);    // phase-match the 112 Hz split
-        regionLevel = { lowR * trim[0], rMidLp.process (restR) * trim[1], rHighHp.process (restR) * trim[2] };
-        const double sig = regionLevel[0] + regionLevel[1] + regionLevel[2];
-
-        // Fundamental tracker: one trigger per input cycle, from a low-pass-tilted copy so
-        // harmonics can't cause extra triggers; hysteresis + lockout reject noise.
-        // It also hears 25–48 Hz, so for very low notes it locks onto the real note rather than
-        // its 2nd harmonic (which would produce a tone at the note's own pitch, not an octave down).
-        const double deep = deepLp.process (deepHp.process (x));
-        const double t = tilt.process (sig + deep);
-        env += (std::abs (t) > env ? envAtk : envRel) * (std::abs (t) - env);
-        const double thr = env * 0.2 + 1e-7;
-        ++sinceFlip;
-        ++sinceCross;
-        if (t < -thr) armed = true;
-        bool steer = false;
-        bool trigger = false;
-        if (armed && prevTilt <= 0.0 && t > 0.0)
+        const double a = std::abs (regionSignal);          // level: the band as you hear it
+        env += (a > env ? envAtk : envRel) * (a - env);
+        const double b = detLp.process (detHp.process (regionSignal));   // pitch: steeper view
+        detEnv += (std::abs (b) > detEnv ? envAtk : envRel) * (std::abs (b) - detEnv);
+        const double thr = detEnv * 0.2 + 1e-7;
+        ++since; ++sinceCross;
+        if (b < -thr) armed = true;
+        if (armed && prev <= 0.0 && b > 0.0)
         {
-            // Cycles shorter than the top band's range mean the note is above it (a vocal, a lead):
-            // the sub goes quiet instead of locking onto every other cycle (which would put out a
-            // tone two octaves down).
             armed = false;
-            tooHigh = sinceCross < minPeriod;
+            const bool tooHigh = sinceCross < minP;
             sinceCross = 0;
-            trigger = ! tooHigh && sinceFlip >= minPeriod;
-        }
-        if (trigger)
-        {
-            const double cand = std::clamp ((double) sinceFlip, (double) minPeriod, (double) maxPeriod);
-            sinceFlip = 0;
-
-            // A big pitch jump must repeat for two cycles before the sub follows it, so one-off
-            // blips (a snare hit or vocal between bass notes) don't make the sub hop around.
-            const bool bigJump = cand > period * 1.3 || cand < period / 1.3;
-            if (bigJump)
+            if (tooHigh)
             {
-                const bool confirms = jumpCand > 0.0 && std::abs (cand / jumpCand - 1.0) < 0.12;
-                if (! confirms)
-                    jumpCand = cand;    // wait for a second cycle; keep running at the old pitch
-                else
+                lastSince = 0;
+                since = 0;
+            }
+            else if (since >= minP)
+            {
+                // Pitch only follows steady readings (two cycles in a row within 12%); a jumpy
+                // reading from a muddle of overtones is ignored and the voice keeps its last good
+                // pitch. Loudness keeps following the band, so nothing drops out.
+                const bool inRange = since <= maxP;   // longer = a lower note leaking in: ignore
+                const bool steady = inRange && lastSince > 0 && std::abs ((double) since / lastSince - 1.0) < 0.12;
+                lastSince = inRange ? since : 0;
+                if (steady)
                 {
-                    period = cand;      // confirmed: switch straight to the new note
-                    jumpCand = 0.0;
-                    steer = true;
+                    period += 0.5 * ((double) since - period);
+                    sinceGood = 0;
+                    // Steer the oscillator to reach its next zero crossing (a multiple of pi)
+                    // exactly one input period from now.
+                    double target = (std::floor (phase / kPi + 0.5) + 1.0) * kPi;
+                    if (target - phase < 0.5 * kPi) target += kPi;
+                    inc = (target - phase) / period;
+                    if (phase > 512.0 * kPi) phase -= 512.0 * kPi;
                 }
-            }
-            else
-            {
-                // Each input cycle = half a cycle of the sub. Remember how long it took.
-                period += 0.5 * (cand - period);
-                jumpCand = 0.0;
-                steer = true;
+                since = 0;
             }
         }
-        if (steer)
-        {
+        // Speaking = had a steady pitch within the last 150 ms.
+        locked = ++sinceGood < holdGood;
+        if (since > 2 * maxP) lastSince = 0;   // note ended or noise
+        prev = b;
+    }
 
-            // Phase-locked oscillator: aim to arrive at the next multiple of pi (a zero crossing of
-            // the sub) exactly one input period from now. Steering the speed instead of resetting
-            // the phase keeps the waveform continuous even when the pitch drifts or glides.
-            double target = (std::floor (phase / kPi + 0.5) + 1.0) * kPi;
-            if (target - phase < 0.5 * kPi) target += kPi;
-            inc = (target - phase) / period;
-            if (phase > 512.0 * kPi) phase -= 512.0 * kPi;   // keep the number small (multiple of 2*pi)
-        }
-        prevTilt = t;
-
-        // Sub = a sine whose half-cycles line up with the input's cycles: exactly f0/2, no steps.
+    // Generates this voice's sub (before band level). Called every sample after detect().
+    double harmAtk = 0.01, harmRel = 0.001;
+    inline double render (double ampCoef, double gateAtk, double gateRel, double harmTarget, double sr)
+    {
+        const double before = phase;
         phase += inc;
-        const double arc = std::sin (phase);
+        // Polarity changes happen exactly at the sub's zero crossings, so they can't click.
+        if (polFlipPending && std::floor (before / kPi) != std::floor (phase / kPi))
+        {
+            pol = -pol;
+            polFlipPending = false;
+        }
 
-        // Loudness follows the input; gate keeps the noise floor from producing rumble.
-        ampEnv += (std::abs (sig) > ampEnv ? envAtk : envRel) * (std::abs (sig) - ampEnv);
-        const double gateTarget = (ampEnv > 2e-4 && ! tooHigh) ? 1.0 : 0.0;
+        ampSmooth += ampCoef * (env - ampSmooth);
+        const double gateTarget = (locked && env > 2e-4) ? 1.0 : 0.0;
         gate += (gateTarget > gate ? gateAtk : gateRel) * (gateTarget - gate);
-        ampSmooth += ampCoef * (ampEnv - ampSmooth);
+        // Ease down when the band is only hearing overtones, come back slowly, so a wobbly
+        // reading can't make it flicker.
+        harm += (harmTarget > harm ? harmRel : harmAtk) * (harmTarget - harm);
 
-        // Notes below ~46 Hz would give a sub under 23 Hz (inaudible, just eats headroom):
-        // fade the sub out for them instead of generating anything.
-        const double f0 = srate / period;
-        const double pitchTarget = std::clamp ((f0 - 38.0) / 8.0, 0.0, 1.0);
+        // A sub under ~22 Hz is inaudible and only eats headroom: fade it out.
+        const double pitchTarget = std::clamp ((sr / period - 40.0) / 8.0, 0.0, 1.0);
         pitchGain += (pitchTarget > pitchGain ? gateAtk : gateRel) * (pitchTarget - pitchGain);
 
-        double s = arc * ampSmooth * gate * pitchGain * kMakeup;
+        double s = pol * std::sin (phase) * ampSmooth * gate * harm * pitchGain;
         for (auto& f : post) s = f.process (s);
-        s = postHp.process (s);
+        return rumble.process (s);
+    }
+};
 
-        // Split into output bands; the low band goes through a matching all-pass so the sum stays flat
-        double low  = xLowLp.process (s);
-        const double rest = xLowHp.process (s);
-        low = apLp.process (low) + apHp.process (low);
-        return { low, xHighLp.process (rest), xHighHp.process (rest) };
+// The subharmonic generator (one per channel, or one for the mid signal): three independent
+// band voices, plus two safeguards for real-world material:
+//  - Overtone control: if a band is only hearing the 2nd–4th harmonic of a lower note, its
+//    "sub" lands on that note itself (restoring the fundamental, as Epicenter does), so that
+//    band is turned down 12 dB rather than adding a strong tone at the bass's own pitch.
+//    A detector on 25–48 Hz does the same for very low notes.
+//  - Polarity alignment: a note right at a band edge is heard by two voices; if their subs
+//    come out in opposite polarity they'd cancel, so the upper one flips (at a zero crossing).
+struct SubGenerator
+{
+    LR4 inHp, inLp, r1Lp, r1Hp, r2Lp, r2Hp, ap2Lp, ap2Hp, deepHp, deepLp;
+    std::array<Voice, 3> voices;
+    Voice deep;   // detection only
+
+    double envAtk = 0, envRel = 0, gateAtk = 0, gateRel = 0, ampCoef = 0, corrCoef = 0, srate = 48000.0;
+    int holdSamples = 2400;
+
+    static constexpr double kMakeup = 2.0;   // sub level relative to the note it comes from (+6 dB)
+
+    void prepare (double sr)
+    {
+        srate = sr;
+        inHp.setHighpass (sr, kBands[0].lo);  inLp.setLowpass (sr, kBands[2].hi);
+        r1Lp.setLowpass (sr, kBands[0].hi);   r1Hp.setHighpass (sr, kBands[0].hi);
+        r2Lp.setLowpass (sr, kBands[1].hi);   r2Hp.setHighpass (sr, kBands[1].hi);
+        ap2Lp.setLowpass (sr, kBands[1].hi);  ap2Hp.setHighpass (sr, kBands[1].hi);
+        deepHp.setHighpass (sr, 25.0);        deepLp.setLowpass (sr, kBands[0].lo);
+        for (size_t b = 0; b < 3; ++b) voices[b].prepare (sr, kBands[b], true);
+        deep.prepare (sr, { 25.0, 48.0 }, false);
+
+        envAtk   = 1.0 - std::exp (-1.0 / (sr * 0.002));
+        envRel   = 1.0 - std::exp (-1.0 / (sr * 0.050));
+        gateAtk  = 1.0 - std::exp (-1.0 / (sr * 0.004));
+        gateRel  = 1.0 - std::exp (-1.0 / (sr * 0.080));
+        ampCoef  = 1.0 - std::exp (-1.0 / (sr * 0.006));
+        corrCoef = 1.0 - std::exp (-1.0 / (sr * 0.030));
+        holdSamples = (int) (sr * 0.05);
+        reset();
+    }
+
+    void reset()
+    {
+        for (auto* l : { &inHp, &inLp, &r1Lp, &r1Hp, &r2Lp, &r2Hp, &ap2Lp, &ap2Hp, &deepHp, &deepLp }) l->reset();
+        for (auto& v : voices) v.reset();
+        deep.reset();
+    }
+
+    static bool isHarmonicOf (const Voice& upper, const Voice& lower)
+    {
+        if (! lower.locked || ! upper.locked || lower.env < 0.5 * upper.env) return false;
+        // Pitch readings on a band full of overtones wobble a few %, so allow ±10%.
+        const double ratio = lower.period / upper.period;
+        for (double k : { 2.0, 3.0, 4.0 })
+            if (std::abs (ratio / k - 1.0) < 0.10) return true;
+        return false;
+    }
+
+    // Returns the three band subs; regionLevel receives each trimmed input region (for the LEDs).
+    inline std::array<double, 3> process (double x, const std::array<double, 3>& trim, std::array<double, 3>& regionLevel)
+    {
+        // Split 48–160 Hz into the three regions with Linkwitz-Riley crossovers
+        const double bandIn = inLp.process (inHp.process (x));
+        double r1 = r1Lp.process (bandIn);
+        const double rest = r1Hp.process (bandIn);
+        r1 = ap2Lp.process (r1) + ap2Hp.process (r1);   // phase-match the 112 Hz split
+        regionLevel = { r1 * trim[0], r2Lp.process (rest) * trim[1], r2Hp.process (rest) * trim[2] };
+
+        deep.detect (deepLp.process (deepHp.process (x)), envAtk, envRel);
+        for (size_t b = 0; b < 3; ++b) voices[b].detect (regionLevel[b], envAtk, envRel);
+
+        std::array<double, 3> out {};
+        for (size_t b = 0; b < 3; ++b)
+        {
+            bool harmonic = isHarmonicOf (voices[b], deep);
+            for (size_t j = 0; j < b; ++j) harmonic = harmonic || isHarmonicOf (voices[b], voices[j]);
+            // Overtones of a lower note are turned down (-12 dB), not muted: like Epicenter, some of
+            // that harmonic-derived bass reinforces the fundamental, and muting would make it chop.
+            out[b] = voices[b].render (ampCoef, gateAtk, gateRel, harmonic ? 0.25 : 1.0, srate);
+        }
+
+        // Polarity alignment: only between two neighbours that are both genuinely playing the
+        // same note (otherwise near-silent ringing could trigger endless flips).
+        voices[0].pow += corrCoef * (out[0] * out[0] - voices[0].pow);
+        for (size_t b = 1; b < 3; ++b)
+        {
+            auto& v = voices[b];
+            const auto& lo = voices[b - 1];
+            v.corr += corrCoef * (out[b] * out[b - 1] - v.corr);
+            v.pow  += corrCoef * (out[b] * out[b] - v.pow);
+            if (v.flipHold > 0) --v.flipHold;
+            const bool bothPlaying = v.locked && lo.locked && v.gate > 0.5 && lo.gate > 0.5
+                                     && lo.pow > 0.05 * v.pow && v.pow > 0.05 * lo.pow
+                                     && std::abs (lo.period / v.period - 1.0) < 0.1;
+            if (bothPlaying && v.flipHold == 0 && ! v.polFlipPending && v.corr < -0.3 * std::sqrt (v.pow * lo.pow))
+            {
+                v.polFlipPending = true;
+                v.corr = 0.0;
+                v.flipHold = holdSamples;
+            }
+        }
+
+        for (auto& o : out) o *= kMakeup;
+        return out;
     }
 };
 
@@ -378,8 +434,12 @@ public:
         tightFreq.prepare (sr, 20, 12.5);
         tightFreq2.prepare (sr, 20, 12.5);
         scopeEvery = std::max (1, (int) (sr / 6000.0));   // ~85 ms of signal across the scope
-        limDecay = std::exp (-1.0 / (sr * 0.120));
-        limEnv = 0.0;
+        la = std::clamp ((int) std::lround (sr * 0.002), 1, kMaxLookahead - 1);
+        limRel = 1.0 - std::exp (-1.0 / (sr * 0.120));
+        for (auto& d : delayLine) d.fill (0.0);
+        reqRing.fill (1.0); boxRing.fill (1.0);
+        boxSum = (double) la; gState = 1.0;
+        laPos = boxPos = dPos = 0;
         compAtk = 1.0 - std::exp (-1.0 / (sr * 0.001));
         compRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
         setParams (p);
@@ -535,20 +595,34 @@ public:
                 scopeWrite.store ((w + 1) % kScopeSize, std::memory_order_release);
             }
 
-            // Safety limiter: instant attack (so nothing ever passes the ceiling), 120 ms release,
-            // linked across channels so the stereo image doesn't shift. Does nothing below the ceiling.
+            // Safety limiter with 2 ms look-ahead: it sees a peak coming and eases the gain down
+            // over those 2 ms instead of slamming it (which is what makes limiters sound crunchy),
+            // so nothing passes the ceiling. 120 ms release; linked across channels. The audio is
+            // always delayed by the look-ahead (reported to the host) so latency never changes.
             double pk = 0.0;
             for (int c = 0; c < numCh; ++c) { y[c] *= go; pk = std::max (pk, std::abs (y[c])); }
-            limEnv = std::max (pk, limEnv * limDecay);
-            const double lg = (p.limit && limEnv > kCeiling) ? kCeiling / limEnv : 1.0;
+            const double req = (p.limit && pk > kCeiling) ? kCeiling / pk : 1.0;
+            reqRing[(size_t) laPos] = req;
+            double target = 1.0;
+            for (int k = 0; k <= la; ++k) target = std::min (target, reqRing[(size_t) k]);
+            gState = target < gState ? target : gState + limRel * (target - gState);
+            boxSum += gState - boxRing[(size_t) boxPos];
+            boxRing[(size_t) boxPos] = gState;
+            boxPos = (boxPos + 1) % la;
+            if (boxPos == 0) { boxSum = 0.0; for (int k = 0; k < la; ++k) boxSum += boxRing[(size_t) k]; }   // no drift
+            const double lg = std::min (1.0, boxSum / la);
+            laPos = (laPos + 1) % (la + 1);
             minGain = std::min (minGain, lg);
 
             for (int c = 0; c < numCh; ++c)
             {
-                y[c] *= lg;
+                const double delayed = delayLine[(size_t) c][(size_t) dPos];
+                delayLine[(size_t) c][(size_t) dPos] = y[c];
+                y[c] = delayed * lg;
                 pkOutL[c] = std::max (pkOutL[c], std::abs (y[c]));
                 channels[c][i] = (float) y[c];
             }
+            dPos = (dPos + 1) % la;
         }
 
         for (int b = 0; b < 3; ++b)
@@ -630,7 +704,15 @@ private:
     Smoothed gainIn, mixS, widthS;
     bool lowEndOn = false, monoOn = false;
     static constexpr double kCeiling = 0.9660509;   // -0.3 dBFS
-    double limEnv = 0.0, limDecay = 0.9999;
+    static constexpr int kMaxLookahead = 512;
+    std::array<std::array<double, kMaxLookahead>, kMaxCh> delayLine {};
+    std::array<double, kMaxLookahead> reqRing {}, boxRing {};
+    double boxSum = 1.0, gState = 1.0, limRel = 0.001;
+    int la = 96, laPos = 0, boxPos = 0, dPos = 0;
+
+public:
+    int latencySamples() const { return la; }
+private:
     int scopeDecim = 0, scopeEvery = 8;
     float lastMono = -1000, lastLowEnd = -1000;
     std::array<EdgeChannel, kMaxCh> edge;

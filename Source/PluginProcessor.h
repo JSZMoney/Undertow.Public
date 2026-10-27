@@ -8,7 +8,7 @@ namespace ParamIDs
     inline const juce::String trim[3]  { "trimLow",  "trimMid",  "trimHigh" };
     inline const juce::String level[3] { "bandLow", "bandMid", "bandHigh" };   // 0..1, shown as %
     inline const juce::String solo[3]  { "soloLow",  "soloMid",  "soloHigh" };
-    inline const juce::String subMaster { "subMaster" };
+    inline const juce::String subMaster { "subAmount" };   // 0..1, shown as %
     inline const juce::String gainIn { "gainIn" };
     inline const juce::String mix { "mix" };
     inline const juce::String monoMaker { "monoMaker" };

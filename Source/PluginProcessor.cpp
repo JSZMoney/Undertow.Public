@@ -49,7 +49,8 @@ APVTS::ParameterLayout UndertowProcessor::createLayout()
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::solo[b], v }, String (names[b]) + " Solo", false));
     }
 
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::subMaster, v }, "Subharmonics", dbRange (undertow::kMinDb, 12.0f), 0.0f, dbAttr));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::subMaster, v }, "Subharmonics",
+                                                       NormalisableRange<float> (0.0f, 1.0f, 0.001f), 0.5f, pctAttr));
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::midMode, v }, "Synthesis Input Mid", true));
 
     // Global
@@ -92,7 +93,7 @@ undertow::Params UndertowProcessor::readParams() const
         p.levelDb[b] = bandPercentToDb (f (ParamIDs::level[b]));
         p.solo[b] = f (ParamIDs::solo[b]) > 0.5f;
     }
-    p.subMasterDb = f (ParamIDs::subMaster);
+    p.subMasterDb = bandPercentToDb (f (ParamIDs::subMaster));
     p.gainInDb = f (ParamIDs::gainIn);
     p.mix = f (ParamIDs::mix);
     p.monoMakerHz = f (ParamIDs::monoMaker);
@@ -115,6 +116,7 @@ void UndertowProcessor::prepareToPlay (double sampleRate, int)
 {
     engine.setParams (readParams());
     engine.prepare (sampleRate);
+    setLatencySamples (engine.latencySamples());   // the limiter's 2 ms look-ahead
 }
 
 void UndertowProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
