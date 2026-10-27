@@ -39,9 +39,17 @@ APVTS::ParameterLayout UndertowProcessor::createLayout()
         layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::solo[b], v }, String (names[b]) + " Solo", false));
     }
 
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::subMaster, v }, "Subharmonics", dbRange (undertow::kMinDb, 12.0f), -6.0f, dbAttr));
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::original, v }, "Original", dbRange (undertow::kMinDb, 6.0f), 0.0f, dbAttr));
-    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::midMode, v }, "Mono Sub (Mid)", true));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::subMaster, v }, "Subharmonics", dbRange (undertow::kMinDb, 12.0f), 0.0f, dbAttr));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::midMode, v }, "Synthesis Input Mid", true));
+
+    // Global
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::gainIn, v }, "Gain In", dbRange (-24.0f, 24.0f), 0.0f, dbAttr));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::mix, v }, "Mix", NormalisableRange<float> (0.0f, 1.0f, 0.001f), 1.0f, pctAttr));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::monoMaker, v }, "Mono Maker",
+        hzRange (20.0f, 500.0f), 20.0f,
+        AudioParameterFloatAttributes().withStringFromValueFunction ([] (float x, int) { return x <= 20.5f ? String ("Off") : hzText (x, 0); })));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::width, v }, "Stereo Width", NormalisableRange<float> (0.0f, 2.0f, 0.001f), 1.0f, pctAttr));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::lowEnd, v }, "Low End", dbRange (-12.0f, 12.0f), 0.0f, dbAttr));
 
     layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::edgeOn, v }, "Edge On", false));
     layout.add (std::make_unique<AudioParameterChoice> (ParameterID { ParamIDs::edgeMode, v }, "Edge Mode", StringArray { "Smooth", "Harsh" }, 0));
@@ -51,7 +59,7 @@ APVTS::ParameterLayout UndertowProcessor::createLayout()
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::edgeHighCut, v }, "Edge High Cut", hzRange (200.0f, 20000.0f), 5000.0f, hzAttr));
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::edgeLevel, v }, "Edge Level", dbRange (undertow::kMinDb, 6.0f), -12.0f, dbAttr));
 
-    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::output, v }, "Output", dbRange (-24.0f, 12.0f), 0.0f, dbAttr));
+    layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::output, v }, "Gain Out", dbRange (-24.0f, 12.0f), 0.0f, dbAttr));
     return layout;
 }
 
@@ -74,7 +82,11 @@ undertow::Params UndertowProcessor::readParams() const
         p.solo[b] = f (ParamIDs::solo[b]) > 0.5f;
     }
     p.subMasterDb = f (ParamIDs::subMaster);
-    p.dryDb = f (ParamIDs::original);
+    p.gainInDb = f (ParamIDs::gainIn);
+    p.mix = f (ParamIDs::mix);
+    p.monoMakerHz = f (ParamIDs::monoMaker);
+    p.width = f (ParamIDs::width);
+    p.lowEndDb = f (ParamIDs::lowEnd);
     p.midMode = f (ParamIDs::midMode) > 0.5f;
     p.edgeOn = f (ParamIDs::edgeOn) > 0.5f;
     p.edgeMode = (int) f (ParamIDs::edgeMode);

@@ -9,7 +9,11 @@ namespace ParamIDs
     inline const juce::String level[3] { "levelLow", "levelMid", "levelHigh" };
     inline const juce::String solo[3]  { "soloLow",  "soloMid",  "soloHigh" };
     inline const juce::String subMaster { "subMaster" };
-    inline const juce::String original { "original" };
+    inline const juce::String gainIn { "gainIn" };
+    inline const juce::String mix { "mix" };
+    inline const juce::String monoMaker { "monoMaker" };
+    inline const juce::String width { "width" };
+    inline const juce::String lowEnd { "lowEnd" };
     inline const juce::String midMode { "midMode" };
     inline const juce::String edgeOn { "edgeOn" };
     inline const juce::String edgeMode { "edgeMode" };

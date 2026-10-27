@@ -13,49 +13,72 @@ Works in **Adobe Audition** and **Ableton Live**.
 
 ## Controls
 
-| Section | Control | What it does |
-|---|---|---|
-| Input | **Tight Punch** | Resonant high-pass (Off–250 Hz) on the input. Tames boomy existing lows and adds a punch bump at the cutoff before synthesis. |
-| Input | **Mono Sub** | Subs are generated from the mid (L+R) signal and placed dead-centre. Leave on unless you want stereo subs. |
-| Bands | **LED** | Signal indicator — lights when that band has material to fold down. Boost bands whose LED is lit. |
-| Bands | **Trim** | 0 to +18 dB boost into that band's detector. Use for quiet sources so the divider locks on. |
-| Bands | **Sub** | Level of that band's generated subharmonic. Meter shows its output. |
-| Bands | **Solo** | Hear only that band's sub (dry and Edge muted). Multiple solos combine. |
-| Mix | **Subharmonics** | Master level of all generated subs. |
-| Mix | **Original** | Dry signal level. Turn fully down (-inf) to get subs only. |
-| Mix | **Output** | Final output gain. |
-| Edge | **Edge / Smooth–Harsh** | Parallel saturation + compression path. Smooth = tube-ish tanh. Harsh = asymmetric hard clip, trashier. |
-| Edge | **Squeeze** | Compression amount (threshold + ratio together). |
-| Edge | **Drive** | Saturation depth (auto level-compensated). |
-| Edge | **Low / High Cut** | Band-limit what goes into the Edge path. |
-| Edge | **Level** | How much Edge is blended in. |
+**Global**
 
-**Band map** (input region → generated sub):
+| Control | What it does |
+|---|---|
+| **Synthesis Input** | *Mid*: subs are made from L+R and stay dead-centre (recommended). *Stereo*: separate subs per side. |
+| **Gain In / Gain Out** | Input and output level. |
+| **Mix** | Blend between the untouched input (0%) and the fully processed signal (100%). |
+| **Mono Maker** | Everything below this frequency is made mono (Off–500 Hz). Keeps the low end tight on club systems. |
+| **Stereo Width** | 0% = mono, 100% = unchanged, 200% = extra wide. |
+| **Input meters** | L/R input level. |
 
-- **Low**: 48–72 Hz → 24–36 Hz
-- **Mid**: 72–112 Hz → 36–56 Hz
-- **High**: 112–220 Hz → 56–110 Hz (good for snares, toms, guitars, male vocals)
+**Sub**
+
+| Control | What it does |
+|---|---|
+| **Subharmonics** | Master level of all generated subs. |
+| **Band knobs** (24–36, 36–56, 56–110 Hz) | Level of the sub landing in each range. Meter under each shows its output. |
+| **Trim** (small knob) | 0 to +18 dB boost into that band's input region. Use on quiet sources so the tracker locks on. |
+| **Solo** | Hear only that band's sub (the original is muted). Solo all three to hear just the subs. |
+| **LED** next to each range | Lights when there's material in that range to fold down. Boost bands whose LED is lit. |
+| **Sub Out scope** | Live view of the generated sub. |
+
+**Edge** (power button top-right)
+
+| Control | What it does |
+|---|---|
+| **Mode** | *Smooth*: tube-like saturation. *Harsh*: asymmetric clipping, trashier. |
+| **Squeeze** | Compression amount. |
+| **Drive** | Saturation depth (auto level-compensated). |
+| **Low / High Cut** | Band-limit what goes into the Edge path. |
+| **Edge Level** | How much Edge is blended in (parallel). |
+| **Tight Punch** | Resonant high-pass (Off–250 Hz) before synthesis: tames boomy existing lows, adds punch. |
+| **Low End** | ±12 dB low shelf (100 Hz) on the original signal. |
+| **Output meters** | L/R output level. |
+
+**Band map** (note being played → generated sub):
+
+- 48–72 Hz → **24–36 Hz**
+- 72–112 Hz → **36–56 Hz**
+- 112–220 Hz → **56–110 Hz** (good for snares, toms, guitars, male vocals)
 
 ### Quick setup
-1. Set **Tight Punch** to just below the lowest note you care about.
-2. Watch the LEDs; raise **Sub** on bands that light up. Use **Solo** to audition each.
-3. If a band flickers or sounds broken up, raise its **Trim**.
-4. Blend with **Subharmonics**. Check on headphones/sub — 24–36 Hz is inaudible on laptop speakers.
-5. Optional: switch on **Edge** for grit/density.
+1. Set **Tight Punch** just below the lowest note you care about.
+2. Watch the LEDs; raise the band knobs whose LED lights. Use **Solo** to audition each.
+3. If the sub breaks up on a quiet source, raise that band's **Trim**.
+4. Blend with **Subharmonics**. Check on headphones or a sub — 24–36 Hz is inaudible on laptop speakers.
+5. Optional: switch on **Edge** for grit and density.
 
 ---
 
 ## How the synthesis works
 
-Each band band-passes its region, watches for positive-going zero crossings (with hysteresis so
-noise can't double-trigger) and flips a ±1 "flip-flop" every cycle. Multiplying the band signal by
-that flip-flop produces a wave at exactly **half the frequency** that follows the input's
-dynamics with no clicks (flips happen at zero). A 6th-order low-pass removes the by-products,
-leaving a clean sub. Bands are weighted by which one "owns" a note, and adjacent bands are
-polarity-locked so they reinforce instead of cancelling at the crossovers.
+A single tracker follows the *fundamental* of the bass region (48–220 Hz). It triggers once
+per input cycle, using a low-pass-tilted copy of the signal so harmonics can't cause extra
+triggers, with hysteresis and a minimum-period lockout to reject noise. Each trigger starts a
+new half-sine arc lasting one input period with alternating polarity, which produces a **clean
+sine at exactly half the frequency**. Its loudness follows the input's envelope and a gate
+silences it below about -74 dBFS. The sub is then split into the three output bands with
+Linkwitz-Riley crossovers, which sum back flat.
 
-Measured (48 kHz, `tests/engine_test.cpp`): octave-down output is flat within about ±2 dB
-across 48–220 Hz input, with by-products 35+ dB below the sub.
+Because the sub is a sine at f/2, it never lands on the original note or its harmonics, so it
+adds low end without cancelling anything that's already there.
+
+Measured (48 kHz, `tests/engine_test.cpp` and a synthetic drum+bass loop): output within about
+±3 dB across 64–200 Hz input, sub level roughly equal to the note it comes from, and
+non-harmonic by-products about 40 dB below the sub.
 
 All DSP lives in `Source/SubEngine.h` (no JUCE dependency) if you want to tweak it.
 
