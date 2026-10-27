@@ -1,0 +1,52 @@
+# Builds ready-to-install Windows (.vst3) and macOS (.vst3 + .component) plugins.
+# Download them from the run's "Artifacts" section on the Actions tab.
+name: Build plugin
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Undertow-Windows
+          - os: macos-latest
+            name: Undertow-macOS
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Collect (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mkdir out
+          cp -r build/Undertow_artefacts/Release/VST3/Undertow.vst3 out/
+          cp build/Undertow_artefacts/Release/Standalone/Undertow.exe out/
+
+      - name: Collect (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir out stage
+          cp -R build/Undertow_artefacts/Release/VST3/Undertow.vst3 stage/
+          cp -R build/Undertow_artefacts/Release/AU/Undertow.component stage/
+          cp -R build/Undertow_artefacts/Release/Standalone/Undertow.app stage/
+          # Ad-hoc sign so Apple Silicon will load them
+          codesign --force --deep --sign - stage/Undertow.vst3 stage/Undertow.component stage/Undertow.app
+          # Zip with ditto so the executable bit inside the bundles survives
+          ditto -c -k --sequesterRsrc stage out/Undertow-macOS-plugins.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: out
