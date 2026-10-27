@@ -89,6 +89,7 @@ public:
     void paint (juce::Graphics&) override;
 private:
     undertow::SubEngine& engine;
+    float displayPeak = 0.0f;
 };
 
 //==============================================================================
@@ -127,6 +128,9 @@ private:
     Switch edgeMode;
     Knob squeeze, drive, lowCut, highCut, edgeLevel, tightPunch, lowEnd;
     LedLadder outL { 18 }, outR { 18 };
+    RoundButton limitBtn;
+    juce::Rectangle<int> limitCaption;
+    float limitGrDb = 0.0f;
 
     bool lastEdgeOn = false;
     juce::Rectangle<int> globalPanel, subPanel, edgePanel, freqGroup;

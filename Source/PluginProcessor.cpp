@@ -60,6 +60,7 @@ APVTS::ParameterLayout UndertowProcessor::createLayout()
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::edgeLevel, v }, "Edge Level", dbRange (undertow::kMinDb, 6.0f), -12.0f, dbAttr));
 
     layout.add (std::make_unique<AudioParameterFloat> (ParameterID { ParamIDs::output, v }, "Gain Out", dbRange (-24.0f, 12.0f), 0.0f, dbAttr));
+    layout.add (std::make_unique<AudioParameterBool> (ParameterID { ParamIDs::limit, v }, "Safety Limiter", true));
     return layout;
 }
 
@@ -96,6 +97,7 @@ undertow::Params UndertowProcessor::readParams() const
     p.edgeHighCutHz = f (ParamIDs::edgeHighCut);
     p.edgeLevelDb = f (ParamIDs::edgeLevel);
     p.outputDb = f (ParamIDs::output);
+    p.limit = f (ParamIDs::limit) > 0.5f;
     return p;
 }
 

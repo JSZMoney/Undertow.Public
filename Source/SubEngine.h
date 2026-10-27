@@ -117,8 +117,8 @@ struct BandDef { double lo, hi; };
 // output bands their subs land in, dbx 120-style:
 //   Low : notes 48–72 Hz  → sub 24–36 Hz
 //   Mid : notes 72–112 Hz → sub 36–56 Hz
-//   High: notes 112–220 Hz→ sub 56–110 Hz
-constexpr std::array<BandDef, 3> kBands { { { 48.0, 72.0 }, { 72.0, 112.0 }, { 112.0, 220.0 } } };
+//   High: notes 112–160 Hz→ sub 56–80 Hz   (bx_subsynth's extra band)
+constexpr std::array<BandDef, 3> kBands { { { 48.0, 72.0 }, { 72.0, 112.0 }, { 112.0, 160.0 } } };
 constexpr double kXoverLow = 36.0, kXoverHigh = 56.0;
 
 // Linkwitz-Riley 4th-order low/high-pass (two cascaded Butterworth 2nd-order sections)
@@ -155,11 +155,13 @@ struct SubGenerator
     double env = 0, envAtk = 0, envRel = 0;
     double ampEnv = 0, gate = 0, gateAtk = 0, gateRel = 0;
     double prevTilt = 0.0, phase = 0.0, inc = 0.0;
+    double jumpCand = 0.0;
     double period = 400.0, ampSmooth = 0.0, ampCoef = 0.0, pitchGain = 0.0, srate = 48000.0;
-    bool armed = false;
+    bool armed = false, tooHigh = false;
+    int sinceCross = 0;
     int sinceFlip = 0, minPeriod = 0, maxPeriod = 0;
 
-    static constexpr double kMakeup = 1.3;   // brings the sub up to roughly the level of the note it comes from
+    static constexpr double kMakeup = 2.0;   // brings the sub up to roughly the level of the note it comes from
 
     void prepare (double sr)
     {
@@ -169,7 +171,7 @@ struct SubGenerator
         apInLp.setLowpass (sr, kBands[1].hi);   apInHp.setHighpass (sr, kBands[1].hi);
         deepHp.setHighpass (sr, 25.0);         deepLp.setLowpass (sr, kBands[0].lo);
         tilt.setLowpass (sr, 70.0, 0.6);
-        for (int i = 0; i < 3; ++i) post[i].setLowpass (sr, 120.0, kBw6[i]);
+        for (int i = 0; i < 3; ++i) post[i].setLowpass (sr, 95.0, kBw6[i]);
         postHp.setHighpass (sr, 18.0, 0.70710678);
         xLowLp.setLowpass (sr, kXoverLow);   xLowHp.setHighpass (sr, kXoverLow);
         xHighLp.setLowpass (sr, kXoverHigh); xHighHp.setHighpass (sr, kXoverHigh);
@@ -181,6 +183,7 @@ struct SubGenerator
         gateRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
         minPeriod = (int) (sr / 240.0);
         maxPeriod = (int) (sr / 22.0);
+        minPeriod = (int) (sr / 175.0);
         srate = sr;
         ampCoef = 1.0 - std::exp (-1.0 / (sr * 0.006));   // smooth the loudness so it can't add grit
         reset();
@@ -191,8 +194,8 @@ struct SubGenerator
         for (auto* l : { &inHp48, &inLp220, &rLowLp, &rRestHp, &rMidLp, &rHighHp, &apInLp, &apInHp, &deepHp, &deepLp }) l->reset();
         tilt.reset(); for (auto& f : post) f.reset(); postHp.reset();
         for (auto* l : { &xLowLp, &xLowHp, &xHighLp, &xHighHp, &apLp, &apHp }) l->reset();
-        env = ampEnv = gate = prevTilt = ampSmooth = pitchGain = 0.0;
-        armed = false; sinceFlip = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
+        env = ampEnv = gate = prevTilt = ampSmooth = pitchGain = jumpCand = 0.0;
+        armed = tooHigh = false; sinceFlip = sinceCross = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
         phase = 0.0; inc = kPi / period;
     }
 
@@ -217,11 +220,50 @@ struct SubGenerator
         env += (std::abs (t) > env ? envAtk : envRel) * (std::abs (t) - env);
         const double thr = env * 0.2 + 1e-7;
         ++sinceFlip;
+        ++sinceCross;
         if (t < -thr) armed = true;
-        if (armed && prevTilt <= 0.0 && t > 0.0 && sinceFlip >= minPeriod)
+        bool steer = false;
+        bool trigger = false;
+        if (armed && prevTilt <= 0.0 && t > 0.0)
         {
-            // Each input cycle = half a cycle of the sub. Remember how long it took.
-            period += 0.5 * (std::clamp ((double) sinceFlip, (double) minPeriod, (double) maxPeriod) - period);
+            // Cycles shorter than the top band's range mean the note is above it (a vocal, a lead):
+            // the sub goes quiet instead of locking onto every other cycle (which would put out a
+            // tone two octaves down).
+            armed = false;
+            tooHigh = sinceCross < minPeriod;
+            sinceCross = 0;
+            trigger = ! tooHigh && sinceFlip >= minPeriod;
+        }
+        if (trigger)
+        {
+            const double cand = std::clamp ((double) sinceFlip, (double) minPeriod, (double) maxPeriod);
+            sinceFlip = 0;
+
+            // A big pitch jump must repeat for two cycles before the sub follows it, so one-off
+            // blips (a snare hit or vocal between bass notes) don't make the sub hop around.
+            const bool bigJump = cand > period * 1.3 || cand < period / 1.3;
+            if (bigJump)
+            {
+                const bool confirms = jumpCand > 0.0 && std::abs (cand / jumpCand - 1.0) < 0.12;
+                if (! confirms)
+                    jumpCand = cand;    // wait for a second cycle; keep running at the old pitch
+                else
+                {
+                    period = cand;      // confirmed: switch straight to the new note
+                    jumpCand = 0.0;
+                    steer = true;
+                }
+            }
+            else
+            {
+                // Each input cycle = half a cycle of the sub. Remember how long it took.
+                period += 0.5 * (cand - period);
+                jumpCand = 0.0;
+                steer = true;
+            }
+        }
+        if (steer)
+        {
 
             // Phase-locked oscillator: aim to arrive at the next multiple of pi (a zero crossing of
             // the sub) exactly one input period from now. Steering the speed instead of resetting
@@ -230,9 +272,6 @@ struct SubGenerator
             if (target - phase < 0.5 * kPi) target += kPi;
             inc = (target - phase) / period;
             if (phase > 512.0 * kPi) phase -= 512.0 * kPi;   // keep the number small (multiple of 2*pi)
-
-            armed = false;
-            sinceFlip = 0;
         }
         prevTilt = t;
 
@@ -242,7 +281,7 @@ struct SubGenerator
 
         // Loudness follows the input; gate keeps the noise floor from producing rumble.
         ampEnv += (std::abs (sig) > ampEnv ? envAtk : envRel) * (std::abs (sig) - ampEnv);
-        const double gateTarget = ampEnv > 2e-4 ? 1.0 : 0.0;
+        const double gateTarget = (ampEnv > 2e-4 && ! tooHigh) ? 1.0 : 0.0;
         gate += (gateTarget > gate ? gateAtk : gateRel) * (gateTarget - gate);
         ampSmooth += ampCoef * (ampEnv - ampSmooth);
 
@@ -294,6 +333,7 @@ struct Params
     float edgeHighCutHz = 5000.0f;
     float edgeLevelDb = -12.0f;
     float outputDb = 0.0f;
+    bool  limit = true;                         // safety peak limiter on the output (ceiling -0.3 dBFS)
 };
 
 //==============================================================================
@@ -305,6 +345,7 @@ public:
     // Meters (written by audio thread as block peaks, read & cleared by the UI)
     std::array<std::atomic<float>, 3> meterBandIn {}, meterBandOut {};
     std::array<std::atomic<float>, 2> meterIn {}, meterOut {};
+    std::atomic<float> meterLimitGR { 0.0f };   // 1 - lowest limiter gain in the block (0 = not limiting)
 
     // Scope of the generated sub (decimated ring buffer; written by audio thread, drawn by the UI)
     static constexpr int kScopeSize = 512;
@@ -337,6 +378,8 @@ public:
         tightFreq.prepare (sr, 20, 12.5);
         tightFreq2.prepare (sr, 20, 12.5);
         scopeEvery = std::max (1, (int) (sr / 6000.0));   // ~85 ms of signal across the scope
+        limDecay = std::exp (-1.0 / (sr * 0.120));
+        limEnv = 0.0;
         compAtk = 1.0 - std::exp (-1.0 / (sr * 0.001));
         compRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
         setParams (p);
@@ -420,6 +463,7 @@ public:
         if (numCh <= 0) return;
 
         std::array<double, 3> pkIn {}, pkOut {};
+        double minGain = 1.0;
         double pkInL[kMaxCh] {}, pkOutL[kMaxCh] {};
 
         for (int i = 0; i < numSamples; ++i)
@@ -491,9 +535,17 @@ public:
                 scopeWrite.store ((w + 1) % kScopeSize, std::memory_order_release);
             }
 
+            // Safety limiter: instant attack (so nothing ever passes the ceiling), 120 ms release,
+            // linked across channels so the stereo image doesn't shift. Does nothing below the ceiling.
+            double pk = 0.0;
+            for (int c = 0; c < numCh; ++c) { y[c] *= go; pk = std::max (pk, std::abs (y[c])); }
+            limEnv = std::max (pk, limEnv * limDecay);
+            const double lg = (p.limit && limEnv > kCeiling) ? kCeiling / limEnv : 1.0;
+            minGain = std::min (minGain, lg);
+
             for (int c = 0; c < numCh; ++c)
             {
-                y[c] *= go;
+                y[c] *= lg;
                 pkOutL[c] = std::max (pkOutL[c], std::abs (y[c]));
                 channels[c][i] = (float) y[c];
             }
@@ -504,6 +556,7 @@ public:
             storeMax (meterBandIn[b], (float) pkIn[b]);
             storeMax (meterBandOut[b], (float) pkOut[b]);
         }
+        storeMax (meterLimitGR, (float) (1.0 - minGain));
         for (int c = 0; c < 2; ++c)
         {
             const int src = std::min (c, numCh - 1);   // mono shows on both meters
@@ -576,6 +629,8 @@ private:
     LR4 monoHp;
     Smoothed gainIn, mixS, widthS;
     bool lowEndOn = false, monoOn = false;
+    static constexpr double kCeiling = 0.9660509;   // -0.3 dBFS
+    double limEnv = 0.0, limDecay = 0.9999;
     int scopeDecim = 0, scopeEvery = 8;
     float lastMono = -1000, lastLowEnd = -1000;
     std::array<EdgeChannel, kMaxCh> edge;

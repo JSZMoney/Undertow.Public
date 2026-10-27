@@ -23,6 +23,7 @@ namespace ParamIDs
     inline const juce::String edgeHighCut { "edgeHighCut" };
     inline const juce::String edgeLevel { "edgeLevel" };
     inline const juce::String output { "output" };
+    inline const juce::String limit { "limit" };
 }
 
 class UndertowProcessor : public juce::AudioProcessor

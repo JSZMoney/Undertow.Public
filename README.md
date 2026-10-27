@@ -29,11 +29,11 @@ Works in **Adobe Audition** and **Ableton Live**.
 | Control | What it does |
 |---|---|
 | **Subharmonics** | Master level of all generated subs. |
-| **Band knobs** (24–36, 36–56, 56–110 Hz) | Level of the sub landing in each range. Meter under each shows its output. |
+| **Band knobs** (24–36, 36–56, 56–80 Hz) | Level of the sub landing in each range. Meter under each shows its output. |
 | **Trim** (small knob) | 0 to +18 dB boost into that band's input region. Use on quiet sources so the tracker locks on. |
-| **Solo** | Hear only that band's sub (the original is muted). Solo all three to hear just the subs. |
+| **Solo** | Audition only that band's sub: the original is muted and Mix is ignored while any Solo is on. Solo all three to hear just the subs. |
 | **LED** next to each range | Lights when there's material in that range to fold down. Boost bands whose LED is lit. |
-| **Sub Out scope** | Live view of the generated sub. |
+| **Sub Out scope** | Live view of the generated sub (auto-zoomed; shows its peak level and turns red if it goes over 0 dBFS). |
 
 The window can be resized by dragging its bottom-right corner (70%–160%); it remembers the size.
 
@@ -49,12 +49,15 @@ The window can be resized by dragging its bottom-right corner (70%–160%); it r
 | **Tight Punch** | Resonant high-pass (Off–250 Hz) before synthesis: tames boomy existing lows, adds punch. |
 | **Low End** | ±12 dB low shelf (100 Hz) on the original signal. |
 | **Output meters** | L/R output level. |
+| **LIMIT** | Safety peak limiter (on by default): the output never goes over -0.3 dBFS. When it's working it shows how many dB it's pulling down; if that's more than a few dB, lower **Gain Out** or **Subharmonics**. |
 
 **Band map** (note being played → generated sub):
 
 - 48–72 Hz → **24–36 Hz**
 - 72–112 Hz → **36–56 Hz**
-- 112–220 Hz → **56–110 Hz** (good for snares, toms, guitars, male vocals)
+- 112–160 Hz → **56–80 Hz** (the extra band bx_subsynth adds; good for snares, toms, guitars)
+
+Notes above 160 Hz produce no sub.
 
 ### Quick setup
 1. Set **Tight Punch** just below the lowest note you care about.
@@ -67,16 +70,21 @@ The window can be resized by dragging its bottom-right corner (70%–160%); it r
 
 ## How the synthesis works
 
-A single tracker follows the *fundamental* of the bass region (48–220 Hz). It triggers once
-per input cycle, using a low-pass-tilted copy of the signal so harmonics can't cause extra
-triggers, with hysteresis and a minimum-period lockout to reject noise. A phase-locked sine
-oscillator is steered so each of its half-cycles lasts exactly one input cycle, giving a
-**clean, continuous sine at exactly half the frequency** even when the pitch drifts or glides.
-Its loudness follows the input's envelope and a gate silences it below about -74 dBFS. The sub
-is then split into the three output bands with Linkwitz-Riley crossovers, which sum back flat.
-The tracker also listens down to 25 Hz so very low notes are recognised correctly; notes below
-about 46 Hz (whose sub would be under 23 Hz and inaudible) fade the sub out instead of
-producing a wrong-pitch tone.
+This follows the dbx 120XP that bx_subsynth models: it listens to 48–72 Hz and 72–112 Hz and
+generates new bass exactly one octave down (24–36 and 36–56 Hz), with bx's extra band taking
+112–160 Hz down to 56–80 Hz.
+
+A single tracker follows the *fundamental* of the bass region. It triggers once per input
+cycle, using a low-pass-tilted copy of the signal so harmonics can't cause extra triggers, with
+hysteresis to reject noise. A big pitch jump has to repeat for two cycles before the sub
+follows it, so one-off blips (a snare hit or a vocal between bass notes) don't make it hop. A
+phase-locked sine oscillator is steered so each of its half-cycles lasts exactly one input
+cycle, giving a **clean, continuous sine at exactly half the frequency** even when the pitch
+drifts or glides. Its loudness follows the input's envelope and a gate silences it below about
+-74 dBFS. The sub is then split into the three output bands with Linkwitz-Riley crossovers,
+which sum back flat. The tracker also listens down to 25 Hz so very low notes are recognised
+correctly; notes below about 46 Hz (whose sub would be under 23 Hz and inaudible) fade the sub
+out instead of producing a wrong-pitch tone.
 
 Because the sub is a sine at f/2, it never lands on the original note or its harmonics, so it
 adds low end without cancelling anything that's already there.

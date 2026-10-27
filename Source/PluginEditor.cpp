@@ -299,19 +299,36 @@ void SubScope::paint (juce::Graphics& g)
 
     constexpr int n = undertow::SubEngine::kScopeSize;
     const int w = engine.scopeWrite.load (std::memory_order_acquire);
+    std::array<float, (size_t) n> buf {};
+    float peak = 0.0f;
+    for (int i = 0; i < n; ++i)
+    {
+        buf[(size_t) i] = engine.scope[(size_t) ((w + i) % n)].load (std::memory_order_relaxed);
+        peak = std::max (peak, std::abs (buf[(size_t) i]));
+    }
+    // Auto-zoom so quiet subs are visible, without ever drawing a waveform clipped that isn't.
+    displayPeak = peak > displayPeak ? peak : displayPeak * 0.97f + peak * 0.03f;
+    const float scale = 0.9f / std::max (displayPeak, 0.003f);
+
     juce::Path p;
     for (int i = 0; i < n; ++i)
     {
-        const float v = juce::jlimit (-1.0f, 1.0f, engine.scope[(size_t) ((w + i) % n)].load (std::memory_order_relaxed) * 1.6f);
+        const float v = buf[(size_t) i] * scale;
         const float px = plot.getX() + plot.getWidth() * (float) i / (float) (n - 1);
         const float py = plot.getCentreY() - v * plot.getHeight() * 0.5f;
         if (i == 0) p.startNewSubPath (px, py); else p.lineTo (px, py);
     }
-    g.setColour (Colours::accent.withAlpha (0.25f));
+    const bool over = peak >= 1.0f;
+    const auto col = over ? juce::Colour (0xffff4a3d) : Colours::accent;
+    g.setColour (col.withAlpha (0.25f));
     g.strokePath (p, juce::PathStrokeType (4.0f, juce::PathStrokeType::curved));
-    g.setColour (Colours::accent);
+    g.setColour (col);
     g.strokePath (p, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved));
 
+    g.setFont (juce::FontOptions (10.5f));
+    g.setColour (over ? col : Colours::dim.withAlpha (0.8f));
+    const juce::String lvl = peak < 1e-5f ? juce::String ("-inf") : juce::String (20.0f * std::log10 (peak), 1);
+    g.drawText ("peak " + lvl + " dBFS" + (over ? "  OVER" : ""), r.reduced (10.0f, 6.0f), juce::Justification::topRight);
     g.setColour (Colours::dim.withAlpha (0.8f));
     g.setFont (juce::FontOptions (10.5f));
     g.drawText ("SUB OUT", r.reduced (10.0f, 6.0f), juce::Justification::topLeft);
@@ -336,13 +353,14 @@ UndertowView::UndertowView (UndertowProcessor& p)
       highCut (p.apvts, ParamIDs::edgeHighCut, "High Cut", Knob::Size::Medium, true),
       edgeLevel (p.apvts, ParamIDs::edgeLevel, "Edge Level", Knob::Size::Small, true),
       tightPunch (p.apvts, ParamIDs::tightPunch, "Tight Punch", Knob::Size::Medium),
-      lowEnd (p.apvts, ParamIDs::lowEnd, "Low End", Knob::Size::Medium)
+      lowEnd (p.apvts, ParamIDs::lowEnd, "Low End", Knob::Size::Medium),
+      limitBtn (p.apvts, ParamIDs::limit, "Safety limiter: keeps the output from going over -0.3 dBFS")
 {
     setLookAndFeel (&look);
 
     for (auto* c : std::initializer_list<juce::Component*> { &synthInput, &gainIn, &gainOut, &mix, &monoMaker, &width, &inL, &inR,
                                                              &subMaster, &scope, &edgePower, &edgeMode, &squeeze, &drive, &lowCut,
-                                                             &highCut, &edgeLevel, &tightPunch, &lowEnd, &outL, &outR })
+                                                             &highCut, &edgeLevel, &tightPunch, &lowEnd, &outL, &outR, &limitBtn })
         addAndMakeVisible (*c);
 
     synthInput.setTooltip ("Mid: subs are made from L+R and stay centred.  Stereo: separate subs per side.");
@@ -350,7 +368,7 @@ UndertowView::UndertowView (UndertowProcessor& p)
     tightPunch.slider.setTooltip ("Resonant high-pass before synthesis: tightens boomy lows, adds punch");
     lowEnd.slider.setTooltip ("Low shelf (100 Hz) on the original signal");
 
-    const char* ranges[3] { "24-36 Hz", "36-56 Hz", "56-110 Hz" };
+    const char* ranges[3] { "24-36 Hz", "36-56 Hz", "56-80 Hz" };
     for (size_t b = 0; b < 3; ++b)
     {
         levels[b] = std::make_unique<Knob> (p.apvts, ParamIDs::level[b], ranges[b], Knob::Size::Small);
@@ -386,6 +404,12 @@ void UndertowView::timerCallback()
     inL.setLevel (e.meterIn[0].exchange (0.0f));
     inR.setLevel (e.meterIn[1].exchange (0.0f));
     outL.setLevel (e.meterOut[0].exchange (0.0f));
+    {
+        const float gr = e.meterLimitGR.exchange (0.0f);
+        const float grDb = gr > 0.0f ? -20.0f * std::log10 (1.0f - gr) : 0.0f;
+        limitGrDb = grDb > limitGrDb ? grDb : limitGrDb * 0.9f;
+        repaint (limitCaption);
+    }
     outR.setLevel (e.meterOut[1].exchange (0.0f));
     scope.repaint();
 
@@ -502,6 +526,16 @@ void UndertowView::paint (juce::Graphics& g)
     g.drawText (edgePower.button.getToggleState() ? "ON" : "OFF", edgePower.getBounds().translated (0, 22).withHeight (12).expanded (6, 0), juce::Justification::centred);
     drawDivider (g, edgePanel, edgePanel.getY() + 500, "Filter");
     drawDivider (g, edgePanel, edgePanel.getBottom() - 92, "Output");
+    {
+        // limiter button + caption sit on the right end of the Output divider
+        g.setColour (Colours::panelBot);
+        g.fillRect (limitCaption.getUnion (limitBtn.getBounds()).expanded (4, 0));
+        const bool on = limitBtn.button.getToggleState();
+        const bool active = on && limitGrDb > 0.1f;
+        g.setColour (active ? Colours::accent : (on ? Colours::text.withAlpha (0.8f) : Colours::dim));
+        g.setFont (juce::FontOptions (10.5f, juce::Font::bold));
+        g.drawText (active ? "LIMIT -" + juce::String (limitGrDb, 1) : juce::String ("LIMIT"), limitCaption, juce::Justification::centredRight);
+    }
 
     // L/R labels + scales for the I/O meters
     g.setColour (Colours::text.withAlpha (0.8f));
@@ -586,6 +620,8 @@ void UndertowView::resized()
         placeKnob (tightPunch, Knob::Size::Medium, cx - 68, y + 514);
         placeKnob (lowEnd,     Knob::Size::Medium, cx + 68, y + 514);
         placeMeters (P, outL, outR);
+        limitBtn.setBounds (P.getRight() - 40, P.getBottom() - 102, 20, 20);
+        limitCaption = { P.getRight() - 112, P.getBottom() - 102, 68, 20 };
     }
 }
 
