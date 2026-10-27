@@ -92,11 +92,12 @@ private:
 };
 
 //==============================================================================
-class UndertowEditor : public juce::AudioProcessorEditor, private juce::Timer
+// The whole interface, laid out at a fixed 1000 x 760 design size.
+class UndertowView : public juce::Component, private juce::Timer
 {
 public:
-    explicit UndertowEditor (UndertowProcessor&);
-    ~UndertowEditor() override;
+    explicit UndertowView (UndertowProcessor&);
+    ~UndertowView() override;
     void paint (juce::Graphics&) override;
     void resized() override;
 
@@ -130,6 +131,21 @@ private:
     bool lastEdgeOn = false;
     juce::Rectangle<int> globalPanel, subPanel, edgePanel, freqGroup;
     std::array<juce::Rectangle<int>, 3> bandCells;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (UndertowView)
+};
+
+//==============================================================================
+// The plugin window: hosts the view and scales it to whatever size the window is dragged to.
+class UndertowEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit UndertowEditor (UndertowProcessor&);
+    void resized() override;
+
+private:
+    UndertowProcessor& proc;
+    UndertowView view;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (UndertowEditor)
 };

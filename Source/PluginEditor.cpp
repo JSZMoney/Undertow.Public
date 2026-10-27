@@ -318,8 +318,8 @@ void SubScope::paint (juce::Graphics& g)
 }
 
 //==============================================================================
-UndertowEditor::UndertowEditor (UndertowProcessor& p)
-    : AudioProcessorEditor (p), proc (p),
+UndertowView::UndertowView (UndertowProcessor& p)
+    : proc (p),
       synthInput (*p.apvts.getParameter (ParamIDs::midMode), "Mid", "Stereo", true),
       gainIn (p.apvts, ParamIDs::gainIn, "Gain In", Knob::Size::Medium),
       gainOut (p.apvts, ParamIDs::output, "Gain Out", Knob::Size::Medium),
@@ -369,13 +369,13 @@ UndertowEditor::UndertowEditor (UndertowProcessor& p)
     startTimerHz (30);
 }
 
-UndertowEditor::~UndertowEditor()
+UndertowView::~UndertowView()
 {
     stopTimer();
     setLookAndFeel (nullptr);
 }
 
-void UndertowEditor::timerCallback()
+void UndertowView::timerCallback()
 {
     auto& e = proc.engine;
     for (size_t b = 0; b < 3; ++b)
@@ -447,7 +447,7 @@ static void drawMeterScale (juce::Graphics& g, juce::Rectangle<int> meter, int y
     }
 }
 
-void UndertowEditor::paint (juce::Graphics& g)
+void UndertowView::paint (juce::Graphics& g)
 {
     g.fillAll (Colours::bg);
 
@@ -512,13 +512,13 @@ void UndertowEditor::paint (juce::Graphics& g)
     drawMeterScale (g, outR.getBounds(), outR.getBottom() + 5);
 }
 
-void UndertowEditor::placeKnob (Knob& k, Knob::Size s, int cx, int top)
+void UndertowView::placeKnob (Knob& k, Knob::Size s, int cx, int top)
 {
     const auto sz = Knob::sizeFor (s);
     k.setBounds (cx - sz.x / 2, top, sz.x, sz.y);
 }
 
-void UndertowEditor::resized()
+void UndertowView::resized()
 {
     const int m = 10, gap = 10, sideW = 290;
     const int ph = kH - 2 * m;
@@ -587,4 +587,28 @@ void UndertowEditor::resized()
         placeKnob (lowEnd,     Knob::Size::Medium, cx + 68, y + 514);
         placeMeters (P, outL, outR);
     }
+}
+
+//==============================================================================
+static constexpr const char* kUiWidthProp = "uiWidth";
+
+UndertowEditor::UndertowEditor (UndertowProcessor& p)
+    : AudioProcessorEditor (p), proc (p), view (p)
+{
+    addAndMakeVisible (view);
+    setResizable (true, true);   // corner drag handle
+    setResizeLimits (kW * 7 / 10, kH * 7 / 10, kW * 16 / 10, kH * 16 / 10);
+    getConstrainer()->setFixedAspectRatio ((double) kW / (double) kH);
+
+    // Reopen at the size it was last left at
+    const int w = juce::jlimit (kW * 7 / 10, kW * 16 / 10, (int) p.apvts.state.getProperty (kUiWidthProp, kW));
+    setSize (w, juce::roundToInt ((double) w * kH / kW));
+}
+
+void UndertowEditor::resized()
+{
+    const float scale = (float) getWidth() / (float) kW;
+    view.setTransform (juce::AffineTransform::scale (scale));
+    view.setBounds (0, 0, kW, kH);
+    proc.apvts.state.setProperty (kUiWidthProp, getWidth(), nullptr);
 }

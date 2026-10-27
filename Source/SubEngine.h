@@ -120,6 +120,7 @@ struct LR4
 struct SubGenerator
 {
     LR4 inHp48, inLp220, rLowLp, rRestHp, rMidLp, rHighHp, apInLp, apInHp;   // input-region crossovers
+    LR4 deepHp, deepLp;   // 25–48 Hz: lets the tracker hear notes below the lowest band
     Biquad tilt;
     Biquad post[3];
     Biquad postHp;
@@ -128,7 +129,7 @@ struct SubGenerator
     double env = 0, envAtk = 0, envRel = 0;
     double ampEnv = 0, gate = 0, gateAtk = 0, gateRel = 0;
     double flip = 1.0, prevTilt = 0.0;
-    double period = 400.0, ampSmooth = 0.0, ampCoef = 0.0;
+    double period = 400.0, ampSmooth = 0.0, ampCoef = 0.0, pitchGain = 0.0, srate = 48000.0;
     bool armed = false;
     int sinceFlip = 0, minPeriod = 0, maxPeriod = 0;
 
@@ -140,6 +141,7 @@ struct SubGenerator
         rLowLp.setLowpass (sr, kBands[0].hi);   rRestHp.setHighpass (sr, kBands[0].hi);
         rMidLp.setLowpass (sr, kBands[1].hi);   rHighHp.setHighpass (sr, kBands[1].hi);
         apInLp.setLowpass (sr, kBands[1].hi);   apInHp.setHighpass (sr, kBands[1].hi);
+        deepHp.setHighpass (sr, 25.0);         deepLp.setLowpass (sr, kBands[0].lo);
         tilt.setLowpass (sr, 70.0, 0.6);
         for (int i = 0; i < 3; ++i) post[i].setLowpass (sr, 120.0, kBw6[i]);
         postHp.setHighpass (sr, 18.0, 0.70710678);
@@ -152,17 +154,18 @@ struct SubGenerator
         gateAtk = 1.0 - std::exp (-1.0 / (sr * 0.004));
         gateRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
         minPeriod = (int) (sr / 240.0);
-        maxPeriod = (int) (sr / 40.0);
+        maxPeriod = (int) (sr / 22.0);
+        srate = sr;
         ampCoef = 1.0 - std::exp (-1.0 / (sr * 0.006));   // smooth the loudness so it can't add grit
         reset();
     }
 
     void reset()
     {
-        for (auto* l : { &inHp48, &inLp220, &rLowLp, &rRestHp, &rMidLp, &rHighHp, &apInLp, &apInHp }) l->reset();
+        for (auto* l : { &inHp48, &inLp220, &rLowLp, &rRestHp, &rMidLp, &rHighHp, &apInLp, &apInHp, &deepHp, &deepLp }) l->reset();
         tilt.reset(); for (auto& f : post) f.reset(); postHp.reset();
         for (auto* l : { &xLowLp, &xLowHp, &xHighLp, &xHighHp, &apLp, &apHp }) l->reset();
-        env = ampEnv = gate = prevTilt = ampSmooth = 0.0;
+        env = ampEnv = gate = prevTilt = ampSmooth = pitchGain = 0.0;
         flip = 1.0; armed = false; sinceFlip = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
     }
 
@@ -180,7 +183,10 @@ struct SubGenerator
 
         // Fundamental tracker: one trigger per input cycle, from a low-pass-tilted copy so
         // harmonics can't cause extra triggers; hysteresis + lockout reject noise.
-        const double t = tilt.process (sig);
+        // It also hears 25–48 Hz, so for very low notes it locks onto the real note rather than
+        // its 2nd harmonic (which would produce a tone at the note's own pitch, not an octave down).
+        const double deep = deepLp.process (deepHp.process (x));
+        const double t = tilt.process (sig + deep);
         env += (std::abs (t) > env ? envAtk : envRel) * (std::abs (t) - env);
         const double thr = env * 0.2 + 1e-7;
         ++sinceFlip;
@@ -206,7 +212,13 @@ struct SubGenerator
         gate += (gateTarget > gate ? gateAtk : gateRel) * (gateTarget - gate);
         ampSmooth += ampCoef * (ampEnv - ampSmooth);
 
-        double s = arc * ampSmooth * gate * kMakeup;
+        // Notes below ~46 Hz would give a sub under 23 Hz (inaudible, just eats headroom):
+        // fade the sub out for them instead of generating anything.
+        const double f0 = srate / period;
+        const double pitchTarget = std::clamp ((f0 - 38.0) / 8.0, 0.0, 1.0);
+        pitchGain += (pitchTarget > pitchGain ? gateAtk : gateRel) * (pitchTarget - pitchGain);
+
+        double s = arc * ampSmooth * gate * pitchGain * kMakeup;
         for (auto& f : post) s = f.process (s);
         s = postHp.process (s);
 

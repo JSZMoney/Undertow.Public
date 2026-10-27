@@ -35,6 +35,8 @@ Works in **Adobe Audition** and **Ableton Live**.
 | **LED** next to each range | Lights when there's material in that range to fold down. Boost bands whose LED is lit. |
 | **Sub Out scope** | Live view of the generated sub. |
 
+The window can be resized by dragging its bottom-right corner (70%–160%); it remembers the size.
+
 **Edge** (power button top-right)
 
 | Control | What it does |
@@ -71,7 +73,9 @@ triggers, with hysteresis and a minimum-period lockout to reject noise. Each tri
 new half-sine arc lasting one input period with alternating polarity, which produces a **clean
 sine at exactly half the frequency**. Its loudness follows the input's envelope and a gate
 silences it below about -74 dBFS. The sub is then split into the three output bands with
-Linkwitz-Riley crossovers, which sum back flat.
+Linkwitz-Riley crossovers, which sum back flat. The tracker also listens down to 25 Hz so very low
+notes are recognised correctly; notes below about 46 Hz (whose sub would be under 23 Hz and
+inaudible) fade the sub out instead of producing a wrong-pitch tone.
 
 Because the sub is a sine at f/2, it never lands on the original note or its harmonics, so it
 adds low end without cancelling anything that's already there.
@@ -84,50 +88,38 @@ All DSP lives in `Source/SubEngine.h` (no JUCE dependency) if you want to tweak 
 
 ---
 
-## Building
+## Installing on a Mac (one command)
 
-You need **CMake 3.22+** and a C++ compiler. JUCE is downloaded automatically on first configure.
+Quit your DAW, open Terminal and paste:
 
-### Easiest: let GitHub build it
-Push this folder to a GitHub repo. The included workflow (`.github/workflows/build.yml`) builds
-Windows and Mac versions; download them from the **Actions** tab → latest run → **Artifacts**.
+```
+curl -fsSL https://raw.githubusercontent.com/JSZMoney/Undertow.Public/main/install-mac.sh | bash
+```
 
-### Windows
-1. Install **Visual Studio 2022 Community** with the "Desktop development with C++" workload, and **CMake** (or use the one VS includes).
-2. In a "Developer PowerShell for VS 2022" in this folder:
-   ```
-   cmake -S . -B build
-   cmake --build build --config Release
-   ```
-3. Result: `build\Undertow_artefacts\Release\VST3\Undertow.vst3`
+It downloads the newest build, puts `Undertow.vst3` and `Undertow.component` in
+`~/Library/Audio/Plug-Ins/`, and clears the download-quarantine flag on just those two files.
+Run the same command again to update. Then rescan:
 
-### macOS
-1. Install Xcode Command Line Tools (`xcode-select --install`) and CMake (`brew install cmake`).
-2. In Terminal in this folder:
-   ```
-   cmake -S . -B build -G Xcode
-   cmake --build build --config Release
-   ```
-3. Results: `build/Undertow_artefacts/Release/VST3/Undertow.vst3` and `.../AU/Undertow.component`
+- **Ableton Live:** Settings → Plug-Ins → *Use VST3 Plug-In System Folders* and *Use Audio Units* on → **Rescan**.
+- **Adobe Audition:** Effects → **Audio Plug-In Manager…** → **Scan for Plug-Ins** → enable Undertow.
 
-Tip: set `COPY_PLUGIN_AFTER_BUILD TRUE` in `CMakeLists.txt` to auto-install after each build.
+To uninstall, delete those two files.
 
----
+## How builds happen
 
-## Installing
+Every push to `main` builds Windows and Mac versions on GitHub (`.github/workflows/build.yml`)
+and publishes them as the **latest** release, so the download link above always points at the
+newest build. Windows users can grab `Undertow-Windows-plugins.zip` from the Releases page and
+copy `Undertow.vst3` into `C:\Program Files\Common Files\VST3\`.
 
-| | VST3 | AU (Mac only) |
-|---|---|---|
-| Windows | `C:\Program Files\Common Files\VST3\` | — |
-| macOS | `~/Library/Audio/Plug-Ins/VST3/` | `~/Library/Audio/Plug-Ins/Components/` |
-
-**Mac note:** unsigned plugins downloaded from GitHub may be quarantined. Run once:
-`xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Undertow.vst3`
-(and the same for the `.component`).
-
-**Ableton Live:** Settings → Plug-Ins → turn on *Use VST3 Plug-In System Folders* (and *Use Audio Units* on Mac) → **Rescan**. Find it under Plug-Ins → Undertow Audio.
-
-**Adobe Audition:** Effects → **Audio Plug-In Manager…** → make sure the VST3 folder is listed → **Scan for Plug-Ins** → enable Undertow. It appears in the Effects menu / Effects Rack.
+### Building locally instead
+You need CMake 3.22+ and Xcode Command Line Tools (Mac) or Visual Studio 2022 (Windows);
+JUCE is downloaded automatically.
+```
+cmake -S . -B build
+cmake --build build --config Release
+```
+Results land in `build/Undertow_artefacts/Release/`.
 
 ---
 

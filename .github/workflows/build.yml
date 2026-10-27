@@ -1,9 +1,12 @@
-# Builds ready-to-install Windows (.vst3) and macOS (.vst3 + .component) plugins.
-# Download them from the run's "Artifacts" section on the Actions tab.
+# Builds Windows (.vst3) and macOS (.vst3 + .component) plugins on every push,
+# then publishes them as the "latest" release so they always live at a fixed link:
+#   https://github.com/<you>/<repo>/releases/download/latest/Undertow-macOS-plugins.zip
+# On a Mac, install-mac.sh downloads and installs that in one step.
 name: Build plugin
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -28,11 +31,12 @@ jobs:
 
       - name: Collect (Windows)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir out
-          cp -r build/Undertow_artefacts/Release/VST3/Undertow.vst3 out/
-          cp build/Undertow_artefacts/Release/Standalone/Undertow.exe out/
+          New-Item -ItemType Directory -Force out, stage | Out-Null
+          Copy-Item -Recurse build/Undertow_artefacts/Release/VST3/Undertow.vst3 stage/
+          Copy-Item build/Undertow_artefacts/Release/Standalone/Undertow.exe stage/
+          Compress-Archive -Path stage/* -DestinationPath out/Undertow-Windows-plugins.zip
 
       - name: Collect (macOS)
         if: runner.os == 'macOS'
@@ -50,3 +54,26 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: out
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish as the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          ls -la dist
+          gh release delete latest --repo "$REPO" --yes --cleanup-tag || true
+          gh release create latest dist/Undertow-macOS-plugins.zip dist/Undertow-Windows-plugins.zip \
+            --repo "$REPO" --target "$GITHUB_SHA" --latest \
+            --title "Latest build" \
+            --notes "Built automatically from ${GITHUB_SHA::7}. On a Mac, install with install-mac.sh (see README)."
