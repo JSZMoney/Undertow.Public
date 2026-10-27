@@ -69,20 +69,26 @@ The window can be resized by dragging its bottom-right corner (70%–160%); it r
 
 A single tracker follows the *fundamental* of the bass region (48–220 Hz). It triggers once
 per input cycle, using a low-pass-tilted copy of the signal so harmonics can't cause extra
-triggers, with hysteresis and a minimum-period lockout to reject noise. Each trigger starts a
-new half-sine arc lasting one input period with alternating polarity, which produces a **clean
-sine at exactly half the frequency**. Its loudness follows the input's envelope and a gate
-silences it below about -74 dBFS. The sub is then split into the three output bands with
-Linkwitz-Riley crossovers, which sum back flat. The tracker also listens down to 25 Hz so very low
-notes are recognised correctly; notes below about 46 Hz (whose sub would be under 23 Hz and
-inaudible) fade the sub out instead of producing a wrong-pitch tone.
+triggers, with hysteresis and a minimum-period lockout to reject noise. A phase-locked sine
+oscillator is steered so each of its half-cycles lasts exactly one input cycle, giving a
+**clean, continuous sine at exactly half the frequency** even when the pitch drifts or glides.
+Its loudness follows the input's envelope and a gate silences it below about -74 dBFS. The sub
+is then split into the three output bands with Linkwitz-Riley crossovers, which sum back flat.
+The tracker also listens down to 25 Hz so very low notes are recognised correctly; notes below
+about 46 Hz (whose sub would be under 23 Hz and inaudible) fade the sub out instead of
+producing a wrong-pitch tone.
 
 Because the sub is a sine at f/2, it never lands on the original note or its harmonics, so it
 adds low end without cancelling anything that's already there.
 
-Measured (48 kHz, `tests/engine_test.cpp` and a synthetic drum+bass loop): output within about
-±3 dB across 64–200 Hz input, sub level roughly equal to the note it comes from, and
-non-harmonic by-products about 40 dB below the sub.
+Measured on 16 commercial songs (hip-hop, R&B, house, funk, reggaeton; ~52 minutes): no clicks,
+by-products 38–54 dB below the sub, +1 to +5 dB more energy at 20–60 Hz with default settings,
+and under 1% of one CPU core. The test suite (`tests/engine_test.cpp`) also checks identical
+output at any buffer size, 44.1/48/96 kHz, and fast automation of every control.
+
+**Headroom:** the sub adds real low-frequency energy, so with default settings the output can
+peak 3–6 dB higher than the input on bass-heavy material. Watch the Output meters and pull
+**Subharmonics** or **Gain Out** down if it goes into the red.
 
 All DSP lives in `Source/SubEngine.h` (no JUCE dependency) if you want to tweak it.
 

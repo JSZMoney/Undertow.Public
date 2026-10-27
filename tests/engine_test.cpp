@@ -126,6 +126,96 @@ int main()
         check (s50 < -20.0 && std::abs (s2k) < 0.5, "Mono Maker removes low side content, keeps highs");
     }
 
+    // 5) Robustness: buffer sizes, sample rates, fast automation
+    {
+        // Bass + kick-ish test signal
+        auto makeBass = [] (double rate, int n)
+        {
+            std::vector<float> v ((size_t) n);
+            for (int i = 0; i < n; ++i)
+            {
+                const double t = i / rate, tb = std::fmod (t, 0.5);
+                v[(size_t) i] = (float) (0.35 * std::sin (2 * kPi * 65.4 * t) + 0.12 * std::sin (2 * kPi * 130.8 * t)
+                                         + 0.4 * std::sin (2 * kPi * (50 + 90 * std::exp (-tb * 30)) * tb) * std::exp (-tb * 8));
+            }
+            return v;
+        };
+        auto runBlocks = [] (SubEngine& e, std::vector<float>& L, std::vector<float>& R, int bs)
+        {
+            const int n = (int) L.size();
+            for (int i = 0; i < n; i += bs) { float* ch[2] = { L.data() + i, R.data() + i }; e.process (ch, 2, std::min (bs, n - i)); }
+        };
+
+        // Same output regardless of host buffer size
+        {
+            const auto src = makeBass (sr, N);
+            std::vector<float> refL = src, refR = src;
+            { SubEngine e; Params p; p.edgeOn = true; e.setParams (p); e.prepare (sr); runBlocks (e, refL, refR, 4096); }
+            double worst = 0;
+            for (int bs : { 1, 7, 64, 333, 1024 })
+            {
+                std::vector<float> L = src, R = src;
+                SubEngine e; Params p; p.edgeOn = true; e.setParams (p); e.prepare (sr); runBlocks (e, L, R, bs);
+                for (int i = 0; i < N; ++i) worst = std::max (worst, (double) std::abs (L[(size_t) i] - refL[(size_t) i]));
+            }
+            check (worst < 1e-5, "identical output at buffer sizes 1, 7, 64, 333, 1024, 4096");
+        }
+
+        // Works the same at 44.1 and 96 kHz
+        for (double rate : { 44100.0, 96000.0 })
+        {
+            const int n = (int) rate * 2;
+            std::vector<float> L ((size_t) n), R;
+            for (int i = 0; i < n; ++i) L[(size_t) i] = (float) (0.5 * std::sin (2 * kPi * 90.0 * i / rate));
+            R = L;
+            SubEngine e; Params p; p.solo = { true, true, true }; e.setParams (p); e.prepare (rate); runBlocks (e, L, R, 512);
+            const double sub = goertzelDb (L, 45.0, rate, (size_t) n / 2), junk = goertzelDb (L, 135.0, rate, (size_t) n / 2);
+            char msg[96]; std::snprintf (msg, sizeof msg, "%.0f kHz: 90 Hz -> 45 Hz sub %.1f dB, by-product %.1f dB", rate / 1000, sub, junk);
+            check (sub > -12.0 && sub - junk > 30.0, msg);
+        }
+
+        // Fast automation of every filter-type control must not click.
+        // Input is pure low end (< 300 Hz), so anything above 2 kHz in the output is a click/zipper artefact.
+        {
+            std::vector<float> L ((size_t) N), R;
+            for (int i = 0; i < N; ++i) L[(size_t) i] = (float) (0.4 * std::sin (2 * kPi * 80.0 * i / sr) + 0.2 * std::sin (2 * kPi * 160.0 * i / sr));
+            R = L;
+            std::vector<float> inCopy = L;
+            SubEngine e; Params p; e.setParams (p); e.prepare (sr);
+            const int bs = 64;
+            for (int i = 0, blk = 0; i < N; i += bs, ++blk)
+            {
+                const double ph = 0.5 + 0.5 * std::sin (blk * 0.05);       // fast sweep, ~4 per second
+                p.tightPunchHz  = (float) (10 + 240 * ph);
+                p.lowEndDb      = (float) (-12 + 24 * ph);
+                p.monoMakerHz   = (float) (20 + 480 * ph);
+                p.edgeLowCutHz  = (float) (20 + 600 * ph);
+                p.edgeHighCutHz = (float) (300 + 15000 * ph);
+                p.mix = (float) ph; p.width = (float) (2 * ph); p.subMasterDb = (float) (-30 + 30 * ph);
+                p.levelDb = { (float) (-20 * ph), (float) (-20 * (1 - ph)), 0.0f };
+                e.setParams (p);
+                float* ch[2] = { L.data() + i, R.data() + i };
+                e.process (ch, 2, std::min (bs, N - i));
+            }
+            auto hfDb = [&] (const std::vector<float>& x)
+            {
+                Biquad h[4]; for (int k = 0; k < 4; ++k) h[k].setHighpass (sr, 2000.0, kBw4[k % 2]);
+                double hf = 0, tot = 0;
+                // run the measuring filter from the very start, so its own start-up transient is never counted
+                for (size_t i = 0; i < x.size(); ++i)
+                {
+                    double v = x[i]; const double raw = v;
+                    for (auto& b : h) v = b.process (v);
+                    if (i >= (size_t) sr / 4) { tot += raw * raw; hf += v * v; }
+                }
+                return 10 * std::log10 (hf / tot + 1e-20);
+            };
+            const double hfOut = hfDb (L);
+            char msg[96]; std::snprintf (msg, sizeof msg, "fast automation of all filters/levels: HF artefacts %.1f dB", hfOut);
+            check (hfOut < -60.0, msg);
+        }
+    }
+
     std::printf (failures ? "\n%d FAILURE(S)\n" : "\nALL TESTS PASSED\n", failures);
     return failures ? 1 : 0;
 }

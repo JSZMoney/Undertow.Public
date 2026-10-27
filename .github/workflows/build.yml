@@ -2,6 +2,7 @@
 # then publishes them as the "latest" release so they always live at a fixed link:
 #   https://github.com/<you>/<repo>/releases/download/latest/Undertow-macOS-plugins.zip
 # On a Mac, install-mac.sh downloads and installs that in one step.
+# Every build is also kept as its own "build-N" release, so older versions stay downloadable.
 name: Build plugin
 
 on:
@@ -77,3 +78,13 @@ jobs:
             --repo "$REPO" --target "$GITHUB_SHA" --latest \
             --title "Latest build" \
             --notes "Built automatically from ${GITHUB_SHA::7}. On a Mac, install with install-mac.sh (see README)."
+
+      - name: Also keep this build as its own numbered release (older builds stay downloadable)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "build-${{ github.run_number }}" dist/Undertow-macOS-plugins.zip dist/Undertow-Windows-plugins.zip \
+            --repo "$REPO" --target "$GITHUB_SHA" --latest=false \
+            --title "Build ${{ github.run_number }} (${GITHUB_SHA::7})" \
+            --notes "Archived build from commit ${GITHUB_SHA::7}."

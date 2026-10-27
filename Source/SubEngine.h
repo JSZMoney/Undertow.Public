@@ -72,6 +72,32 @@ private:
     }
 };
 
+// Topology-preserving state-variable high-pass (Simper/Cytomic). Unlike a biquad it stays
+// clean while its frequency is being swept, so it's used for the Tight Punch control.
+struct SvfHighpass
+{
+    double ic1 = 0, ic2 = 0, a1 = 1, a2 = 0, a3 = 0, k = 1;
+    void reset() { ic1 = ic2 = 0; }
+    void set (double sr, double f, double q)
+    {
+        f = std::clamp (f, 5.0, sr * 0.45);
+        const double g = std::tan (kPi * f / sr);
+        k = 1.0 / q;
+        a1 = 1.0 / (1.0 + g * (g + k));
+        a2 = g * a1;
+        a3 = g * a2;
+    }
+    inline double process (double x)
+    {
+        const double v3 = x - ic2;
+        const double v1 = a1 * ic1 + a2 * v3;
+        const double v2 = ic2 + a2 * ic1 + a3 * v3;
+        ic1 = 2.0 * v1 - ic1;
+        ic2 = 2.0 * v2 - ic2;
+        return x - k * v1 - v2;
+    }
+};
+
 // Butterworth section Qs
 constexpr double kBw4[2] = { 0.54119610, 1.30656296 };
 constexpr double kBw6[3] = { 0.51763809, 0.70710678, 1.93185165 };
@@ -111,8 +137,8 @@ struct LR4
 // 2. A single detector follows the FUNDAMENTAL of that signal: zero crossings are
 //    taken from a low-pass-tilted copy so harmonics can't cause extra triggers, with
 //    hysteresis and a minimum-period lockout against noise.
-// 3. Every input cycle flips the polarity of the sub and starts a new half-sine arc
-//    lasting one input period, giving a clean sine at exactly half the fundamental.
+// 3. A phase-locked sine oscillator is steered so that each half-cycle lasts exactly one
+//    input cycle: a clean, continuous sine at half the fundamental, even when the pitch drifts.
 //    (A sine at f0/2 can never cancel the original note or its harmonics.)
 // 4. Its loudness follows the input's envelope; a gate silences it below -74 dBFS.
 // 5. Low-passed, then split by Linkwitz-Riley crossovers into the 3 output bands
@@ -128,7 +154,7 @@ struct SubGenerator
 
     double env = 0, envAtk = 0, envRel = 0;
     double ampEnv = 0, gate = 0, gateAtk = 0, gateRel = 0;
-    double flip = 1.0, prevTilt = 0.0;
+    double prevTilt = 0.0, phase = 0.0, inc = 0.0;
     double period = 400.0, ampSmooth = 0.0, ampCoef = 0.0, pitchGain = 0.0, srate = 48000.0;
     bool armed = false;
     int sinceFlip = 0, minPeriod = 0, maxPeriod = 0;
@@ -166,7 +192,8 @@ struct SubGenerator
         tilt.reset(); for (auto& f : post) f.reset(); postHp.reset();
         for (auto* l : { &xLowLp, &xLowHp, &xHighLp, &xHighHp, &apLp, &apHp }) l->reset();
         env = ampEnv = gate = prevTilt = ampSmooth = pitchGain = 0.0;
-        flip = 1.0; armed = false; sinceFlip = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
+        armed = false; sinceFlip = 0; period = minPeriod > 0 ? minPeriod * 4.0 : 400.0;
+        phase = 0.0; inc = kPi / period;
     }
 
     // Returns the three output-band subs; regionLevel receives each trimmed input region (for the LEDs).
@@ -195,16 +222,23 @@ struct SubGenerator
         {
             // Each input cycle = half a cycle of the sub. Remember how long it took.
             period += 0.5 * (std::clamp ((double) sinceFlip, (double) minPeriod, (double) maxPeriod) - period);
-            flip = -flip;
+
+            // Phase-locked oscillator: aim to arrive at the next multiple of pi (a zero crossing of
+            // the sub) exactly one input period from now. Steering the speed instead of resetting
+            // the phase keeps the waveform continuous even when the pitch drifts or glides.
+            double target = (std::floor (phase / kPi + 0.5) + 1.0) * kPi;
+            if (target - phase < 0.5 * kPi) target += kPi;
+            inc = (target - phase) / period;
+            if (phase > 512.0 * kPi) phase -= 512.0 * kPi;   // keep the number small (multiple of 2*pi)
+
             armed = false;
             sinceFlip = 0;
         }
         prevTilt = t;
 
-        // Sine-shaped sub: each half-cycle is a smooth arc lasting one input period, so the
-        // result is a clean sine at f0/2 rather than a buzzy square-ish wave.
-        const double ph = std::min (1.0, sinceFlip / period);
-        const double arc = std::sin (kPi * ph) * flip;
+        // Sub = a sine whose half-cycles line up with the input's cycles: exactly f0/2, no steps.
+        phase += inc;
+        const double arc = std::sin (phase);
 
         // Loudness follows the input; gate keeps the noise floor from producing rumble.
         ampEnv += (std::abs (sig) > ampEnv ? envAtk : envRel) * (std::abs (sig) - ampEnv);
@@ -299,13 +333,19 @@ public:
         edgeGain.prepare (sr, 20, 0.0);
         out.prepare (sr, 20, dbToGain (p.outputDb));
         lastTight = lastLowCut = lastHighCut = lastMono = lastLowEnd = -1000.0f;
+        tightAmt.prepare (sr, 15, 0.0);
+        tightFreq.prepare (sr, 20, 12.5);
+        tightFreq2.prepare (sr, 20, 12.5);
         scopeEvery = std::max (1, (int) (sr / 6000.0));   // ~85 ms of signal across the scope
         compAtk = 1.0 - std::exp (-1.0 / (sr * 0.001));
         compRel = 1.0 - std::exp (-1.0 / (sr * 0.080));
         setParams (p);
         // Start every smoothed control exactly at its current value (no fade-in on playback start)
         for (auto& g : bandGain) g.cur = g.target;
-        for (auto* sm : { &master, &dry, &edgeGain, &out, &gainIn, &mixS, &widthS }) sm->cur = sm->target;
+        for (auto* sm : { &master, &dry, &edgeGain, &out, &gainIn, &mixS, &widthS, &tightAmt, &tightFreq }) sm->cur = sm->target;
+        tightFreq2.cur = tightFreq2.target = tightFreq.cur;
+        for (auto& t : tight) t.set (sr, tightFreq2.cur, 1.4);
+        tightTuned = tightFreq2.cur;
     }
 
     void reset()
@@ -339,12 +379,10 @@ public:
         edgeGain.target = (p.edgeOn && ! soloActive) ? dbToGain (p.edgeLevelDb) : 0.0;
         out.target      = dbToGain (p.outputDb);
 
+        // Tight Punch glides to its new frequency and fades in/out (see process), so sweeping it can't click
         tightOn = p.tightPunchHz > 12.0f;
-        if (p.tightPunchHz != lastTight)
-        {
-            for (auto& t : tight) t.setHighpass (sr, p.tightPunchHz, 1.4);   // resonant bump = "punch"
-            lastTight = p.tightPunchHz;
-        }
+        tightAmt.target = tightOn ? 1.0 : 0.0;
+        tightFreq.target = std::max (12.5, (double) p.tightPunchHz);
         lowEndOn = std::abs (p.lowEndDb) > 0.05f;
         if (p.lowEndDb != lastLowEnd)
         {
@@ -390,13 +428,26 @@ public:
             for (int b = 0; b < 3; ++b) g[b] = bandGain[b].next();
             const double gm = master.next(), gd = dry.next(), ge = edgeGain.next(), go = out.next();
             const double gi = gainIn.next(), mx = mixS.next(), wd = widthS.next();
+            const double tightAmtNow = tightAmt.next();
+            tightFreq2.target = tightFreq.next();   // two smoothing stages: block-wise automation becomes a smooth curve
+            tightFreq2.next();
+            // Re-tune the resonant HPF on every sample while it glides. (Re-tuning in coarser steps
+            // leaves a faint buzz at the step rate; per-sample keeps the sweep clean.)
+            {
+                if (tightFreq2.cur != tightTuned)
+                {
+                    for (auto& t : tight) t.set (sr, tightFreq2.cur, 1.4);   // resonant bump = "punch"
+                    tightTuned = tightFreq2.cur;
+                }
+            }
 
             double in[kMaxCh] {}, x[kMaxCh] {}, dryPath[kMaxCh] {};
             for (int c = 0; c < numCh; ++c)
             {
                 in[c] = channels[c][i] * gi;
                 pkInL[c] = std::max (pkInL[c], std::abs (in[c]));
-                x[c] = tightOn ? tight[c].process (in[c]) : in[c];
+                // The filter always runs (so it never restarts with stale state); Off just fades it out.
+                x[c] = in[c] + tightAmtNow * (tight[c].process (in[c]) - in[c]);
                 dryPath[c] = lowEndOn ? lowEnd[c].process (x[c]) : x[c];
             }
 
@@ -516,9 +567,12 @@ private:
     double sr = 44100.0;
     Params p;
     bool soloActive = false, tightOn = false;
+    Smoothed tightAmt, tightFreq, tightFreq2;
+    double tightTuned = -1.0;
     std::array<double, 3> trim { 1, 1, 1 };
     std::array<SubGenerator, kMaxCh> synth;
-    std::array<Biquad, kMaxCh> tight, lowEnd;
+    std::array<SvfHighpass, kMaxCh> tight;
+    std::array<Biquad, kMaxCh> lowEnd;
     LR4 monoHp;
     Smoothed gainIn, mixS, widthS;
     bool lowEndOn = false, monoOn = false;
