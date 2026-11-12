@@ -164,6 +164,17 @@ MainComponent::MainComponent (juce::PropertiesFile& s) : settings (s)
     };
     addAndMakeVisible (volume);
 
+    shareToggle.setColour (juce::ToggleButton::tickColourId, accent);
+    shareToggle.onClick = [this] {
+        config.share = shareToggle.getToggleState();
+        applyConfig();
+    };
+    addAndMakeVisible (shareToggle);
+
+    shareStatus.setFont (juce::Font (juce::FontOptions (12.0f)));
+    shareStatus.setColour (juce::Label::textColourId, dimText);
+    addAndMakeVisible (shareStatus);
+
     scanButton.onClick = [this] { showScanner(); };
     addAndMakeVisible (scanButton);
 
@@ -172,6 +183,7 @@ MainComponent::MainComponent (juce::PropertiesFile& s) : settings (s)
     config.source = settings.getIntValue ("source", 0) == 1 ? sysaudio::Source::selectedApps
                                                              : sysaudio::Source::wholeSystem;
     config.outputUid = settings.getValue ("output").toStdString();
+    config.share = settings.getBoolValue ("share", false);
     for (auto& id : juce::StringArray::fromLines (settings.getValue ("apps")))
         if (id.isNotEmpty())
             config.selectedApps.push_back (id.toStdString());
@@ -180,6 +192,7 @@ MainComponent::MainComponent (juce::PropertiesFile& s) : settings (s)
     engine->onChange = [this] { refreshFromEngine(); };
 
     power.setToggleState (config.power, juce::dontSendNotification);
+    shareToggle.setToggleState (config.share, juce::dontSendNotification);
     sourceBox.setSelectedId (config.source == sysaudio::Source::selectedApps ? 2 : 1, juce::dontSendNotification);
     engine->setConfig (config);
     refreshFromEngine();
@@ -234,7 +247,12 @@ void MainComponent::resized()
     row = area.removeFromTop (28);
     outputLabel.setBounds (row.removeFromLeft (70));
     outputBox.setBounds (row);
-    area.removeFromTop (24);
+    area.removeFromTop (8);
+
+    auto shareArea = area.removeFromTop (shareHeight - 8);
+    shareToggle.setBounds (shareArea.removeFromTop (24));
+    shareStatus.setBounds (shareArea.withTrimmedLeft (26));
+    area.removeFromTop (16);
 
     pluginsLabel.setBounds (area.removeFromTop (24));
     area.removeFromTop (4);
@@ -266,7 +284,7 @@ void MainComponent::updateSourceView()
     const bool apps = config.source == sysaudio::Source::selectedApps;
     appList.setVisible (apps);
     wholeSystemNote.setVisible (! apps);
-    setSize (500, apps ? 600 : 600 - appListHeight + wholeNoteHeight);
+    setSize (500, (apps ? 600 : 600 - appListHeight + wholeNoteHeight) + shareHeight);
     resized();
 }
 
@@ -289,6 +307,11 @@ void MainComponent::refreshFromEngine()
         return;
 
     status.setText (utf8 (engine->status()), juce::dontSendNotification);
+    shareStatus.setText (config.share ? utf8 (engine->shareStatus())
+                                      : juce::String ("Off. Turn on to get an \"Undertow Rack\" input in OBS, Discord, Audition..."),
+                         juce::dontSendNotification);
+    shareStatus.setColour (juce::Label::textColourId,
+                           config.share && engine->shareStatus().rfind ("Sharing the", 0) == 0 ? accent : dimText);
     power.setButtonText (config.power ? "Power On" : "Power Off");
     status.setColour (juce::Label::textColourId, engine->isRunning() ? accent : dimText);
     refreshOutputs();
@@ -535,6 +558,7 @@ void MainComponent::saveSettings()
     settings.setValue ("power", config.power);
     settings.setValue ("source", config.source == sysaudio::Source::selectedApps ? 1 : 0);
     settings.setValue ("output", juce::String (config.outputUid));
+    settings.setValue ("share", config.share);
 
     juce::StringArray ids;
     for (auto& id : config.selectedApps)

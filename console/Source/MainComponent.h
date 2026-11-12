@@ -67,6 +67,10 @@ private:
     std::vector<sysaudio::OutputDevice> shownOutputs;
     std::string shownDefaultName;
 
+    juce::ToggleButton shareToggle { "Share as an input device other apps can record from" };
+    juce::Label shareStatus;
+    static constexpr int shareHeight = 54;
+
     juce::Label pluginsLabel { {}, "Plug-ins" };
     std::array<SlotRow, Rack::numSlots> slotRows;
 

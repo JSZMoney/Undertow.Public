@@ -46,6 +46,11 @@ struct Config
     Source source = Source::wholeSystem;
     std::vector<std::string> selectedApps; // AudioApp::id values
     std::string outputUid;                 // empty = follow the system default output
+
+    // Also publish an input device ("Undertow Rack") that other apps can record from.
+    // It carries the same source (whole system or the selected apps), unprocessed, and works
+    // whether Power is on or off. It only exists while this app is running.
+    bool share = false;
 };
 
 class Engine
@@ -62,6 +67,7 @@ public:
     virtual std::vector<AudioApp> audioApps() = 0;     // apps using audio + remembered selections
     virtual std::string status() const = 0;            // one line for the UI
     virtual bool isRunning() const = 0;                // audio is flowing through the rack
+    virtual std::string shareStatus() const = 0;       // one line about the shared input device
 
     // Called (message thread) when devices, apps or status change.
     std::function<void()> onChange;

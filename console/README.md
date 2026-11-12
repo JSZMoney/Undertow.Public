@@ -30,6 +30,7 @@ Because the builds aren't signed with a paid Apple certificate, macOS may ask ag
 | **Power** | On: your audio runs through the rack. Off: the tap is removed and audio is untouched. |
 | **Source** | *Whole system*, or *Selected apps*: tick the apps to process (apps appear once they've used audio; "playing" shows which are making sound). Unticked apps play normally. |
 | **Output** | Where the processed audio plays. *System default* follows whatever you pick in the menu bar. |
+| **Share as an input device** | Adds an input called **Undertow Rack** that other apps (OBS, Discord, Audition, Ableton...) can pick as their mic/input. It carries the chosen Source (whole system or the ticked apps), without the plug-ins, works with Power on or off, and you still hear everything normally. It only exists while Rack is open. |
 | **Slots 1-3** | Click a slot to choose a plug-in (or Remove). **Edit** opens its window, **Bypass** skips it. Slots run 1 → 2 → 3. |
 | **Volume** | Master output level (-60 dB = muted, up to +6 dB). Output is hard-limited at 0 dBFS. |
 | **Scan for plug-ins...** | Finds your AU and VST3 plug-ins. Run it once after installing, and after adding plug-ins. |

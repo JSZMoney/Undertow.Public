@@ -44,6 +44,7 @@ public:
     }
 
     bool isRunning() const override { return false; }
+    std::string shareStatus() const override { return config.share ? "Sharing needs macOS 14.2 or later." : ""; }
 
 private:
     RenderCallback& callback;

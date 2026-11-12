@@ -104,6 +104,9 @@ const AudioObjectPropertySelector deviceSelectors[] = { kAudioDevicePropertyNomi
 
 NSString* const aggregateUIDPrefix = @"com.undertowaudio.rack.aggregate.";
 
+// Fixed, so other apps remember "Undertow Rack" as their input between launches
+NSString* const shareDeviceUID = @"com.undertowaudio.rack.share";
+
 //==============================================================================
 // Audio client processes, grouped into apps (Chrome's helpers count as Chrome, etc.)
 struct Proc
@@ -272,16 +275,22 @@ public:
         }
 
         teardown();
+        teardownShare();
     }
 
     //==========================================================================
     void setConfig (const Config& c) override
     {
-        const bool same = c.power == config.power && c.source == config.source
-                       && c.selectedApps == config.selectedApps && c.outputUid == config.outputUid;
+        const bool sameSource = c.source == config.source && c.selectedApps == config.selectedApps;
+        const bool sameMain = sameSource && c.power == config.power && c.outputUid == config.outputUid;
+        const bool sameShare = sameSource && c.share == config.share;
         config = c;
-        if (! same)
+        if (! sameMain)
             apply();
+        if (! sameShare)
+            applyShare();
+        if ((! sameMain || ! sameShare) && onChange)
+            onChange();
     }
 
     Config getConfig() const override { return config; }
@@ -292,7 +301,7 @@ public:
         for (auto dev : getIDList (kAudioObjectSystemObject, kAudioHardwarePropertyDevices))
         {
             NSString* uid = getString (dev, kAudioDevicePropertyDeviceUID);
-            if (uid == nil || [uid hasPrefix: aggregateUIDPrefix] || streamCount (dev, kAudioObjectPropertyScopeOutput) == 0)
+            if (uid == nil || [uid hasPrefix: aggregateUIDPrefix] || [uid isEqualToString: shareDeviceUID] || streamCount (dev, kAudioObjectPropertyScopeOutput) == 0)
                 continue;
             list.push_back ({ str (uid), str (getString (dev, kAudioObjectPropertyName)) });
         }
@@ -334,6 +343,7 @@ public:
     }
 
     std::string status() const override { return statusText; }
+    std::string shareStatus() const override { return shareStatusText; }
     bool isRunning() const override { return running; }
 
 private:
@@ -401,6 +411,20 @@ private:
                 rebuild = selectedProcessObjects() != builtProcesses;
             if (rebuild)
                 apply();
+        }
+
+        if (config.share)
+        {
+            bool rebuildShare = shareTap == kAudioObjectUnknown && config.source == Source::wholeSystem;
+            if (config.source == Source::selectedApps)
+                rebuildShare = selectedProcessObjects() != shareProcesses;
+            if (shareUsesOutput && ! rebuildShare)
+            {
+                bool fallback = false;
+                rebuildShare = resolveOutput (fallback) != shareOutput;
+            }
+            if (rebuildShare)
+                applyShare();
         }
 
         if (onChange)
@@ -562,6 +586,128 @@ private:
                    + (fallback ? " (chosen output not found; using default)" : "");
     }
 
+    //==========================================================================
+    // The shared input device: an unmuted, non-private tap in a public aggregate device.
+    // No IOProc here; the tap runs whenever another app reads the device.
+    void applyShare()
+    {
+        teardownShare();
+        if (config.share)
+            buildShare();
+        else
+            shareStatusText.clear();
+    }
+
+    void failShare (const std::string& message)
+    {
+        teardownShare();
+        shareStatusText = message;
+    }
+
+    void buildShare()
+    {
+        shareProcesses.clear();
+        shareUsesOutput = false;
+        shareOutput = kAudioObjectUnknown;
+
+        CATapDescription* desc = nil;
+        if (config.source == Source::wholeSystem)
+        {
+            const AudioObjectID me = ownProcessObject();
+            if (me == kAudioObjectUnknown)
+                return failShare ("Sharing: couldn't identify this app to Core Audio. Try again.");
+            desc = [[CATapDescription alloc] initStereoGlobalTapButExcludeProcesses: @[ @(me) ]];
+        }
+        else
+        {
+            if (config.selectedApps.empty())
+                return failShare ("Sharing: no apps selected.");
+            shareProcesses = selectedProcessObjects();
+            if (shareProcesses.empty())
+            {
+                shareStatusText = "Sharing: waiting for a selected app to make sound...";
+                return;
+            }
+            NSMutableArray<NSNumber*>* objs = [NSMutableArray array];
+            for (auto o : shareProcesses)
+                [objs addObject: @(o)];
+            desc = [[CATapDescription alloc] initStereoMixdownOfProcesses: objs];
+        }
+
+        desc.name = @"Undertow Rack (shared)";
+        desc.UUID = [NSUUID UUID];
+        desc.muteBehavior = CATapUnmuted; // you still hear everything normally
+        if ([desc respondsToSelector: NSSelectorFromString (@"setPrivateTap:")])
+            [desc setValue: @NO forKey: @"privateTap"]; // other apps must be able to read it
+
+        OSStatus err = AudioHardwareCreateProcessTap (desc, &shareTap);
+        if (err != noErr || shareTap == kAudioObjectUnknown)
+        {
+            shareTap = kAudioObjectUnknown;
+            return failShare ("Sharing: couldn't start the audio tap (error " + std::to_string ((int) err)
+                              + "). Allow Undertow Rack in System Settings > Privacy & Security > "
+                                "Screen & System Audio Recording.");
+        }
+
+        NSString* tapUID = getString (shareTap, kAudioTapPropertyUID) ?: desc.UUID.UUIDString;
+        NSArray* tapList = @[ @{ @(kAudioSubTapUIDKey): tapUID, @(kAudioSubTapDriftCompensationKey): @NO } ];
+
+        // First try a device that is only the tap: input-only, the cleanest for other apps.
+        NSMutableDictionary* aggDesc = [@{
+            @(kAudioAggregateDeviceNameKey): @"Undertow Rack",
+            @(kAudioAggregateDeviceUIDKey): shareDeviceUID,
+            @(kAudioAggregateDeviceIsPrivateKey): @NO,
+            @(kAudioAggregateDeviceIsStackedKey): @NO,
+            @(kAudioAggregateDeviceTapAutoStartKey): @YES,
+            @(kAudioAggregateDeviceTapListKey): tapList,
+        } mutableCopy];
+
+        err = AudioHardwareCreateAggregateDevice ((__bridge CFDictionaryRef) aggDesc, &shareAggregate);
+
+        if (err != noErr || shareAggregate == kAudioObjectUnknown
+            || streamCount (shareAggregate, kAudioObjectPropertyScopeInput) == 0)
+        {
+            // Fallback: clock it from the output device, as the Power route does.
+            if (shareAggregate != kAudioObjectUnknown)
+                AudioHardwareDestroyAggregateDevice (shareAggregate);
+            shareAggregate = kAudioObjectUnknown;
+
+            bool fallback = false;
+            shareOutput = resolveOutput (fallback);
+            NSString* outputUID = getString (shareOutput, kAudioDevicePropertyDeviceUID);
+            if (outputUID == nil)
+                return failShare ("Sharing: couldn't create the device (error " + std::to_string ((int) err) + ").");
+
+            aggDesc[@(kAudioAggregateDeviceMainSubDeviceKey)] = outputUID;
+            aggDesc[@(kAudioAggregateDeviceSubDeviceListKey)] = @[ @{ @(kAudioSubDeviceUIDKey): outputUID } ];
+            aggDesc[@(kAudioAggregateDeviceTapListKey)] =
+                @[ @{ @(kAudioSubTapUIDKey): tapUID, @(kAudioSubTapDriftCompensationKey): @YES } ];
+            shareUsesOutput = true;
+
+            err = AudioHardwareCreateAggregateDevice ((__bridge CFDictionaryRef) aggDesc, &shareAggregate);
+            if (err != noErr || shareAggregate == kAudioObjectUnknown)
+            {
+                shareAggregate = kAudioObjectUnknown;
+                return failShare ("Sharing: couldn't create the device (error " + std::to_string ((int) err) + ").");
+            }
+        }
+
+        shareStatusText = std::string ("Sharing ")
+                        + (config.source == Source::wholeSystem ? "the whole system" : "the selected apps")
+                        + " as the input device “Undertow Rack”.";
+    }
+
+    void teardownShare()
+    {
+        if (shareAggregate != kAudioObjectUnknown)
+            AudioHardwareDestroyAggregateDevice (shareAggregate);
+        shareAggregate = kAudioObjectUnknown;
+
+        if (shareTap != kAudioObjectUnknown)
+            AudioHardwareDestroyProcessTap (shareTap);
+        shareTap = kAudioObjectUnknown;
+    }
+
     void teardown()
     {
         running = false;
@@ -721,6 +867,12 @@ private:
     AudioObjectID builtOutput = kAudioObjectUnknown, listenedDevice = kAudioObjectUnknown;
     Float64 builtRate = 0;
     std::set<AudioObjectID> builtProcesses;
+
+    AudioObjectID shareTap = kAudioObjectUnknown, shareAggregate = kAudioObjectUnknown;
+    AudioObjectID shareOutput = kAudioObjectUnknown;
+    bool shareUsesOutput = false;
+    std::set<AudioObjectID> shareProcesses;
+    std::string shareStatusText;
     AudioDeviceIOProcID procID = nullptr;
 
     // Read on the audio thread; only changed while audio is stopped
