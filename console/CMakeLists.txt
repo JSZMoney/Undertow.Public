@@ -32,6 +32,7 @@ juce_add_gui_app(UndertowRack
     COMPANY_NAME "Undertow Audio"
     BUNDLE_ID com.undertowaudio.rack
     VERSION ${PROJECT_VERSION}
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/icon.png"
     # Shown by macOS the first time the app asks to hear system audio.
     PLIST_TO_MERGE [[
 <plist>
